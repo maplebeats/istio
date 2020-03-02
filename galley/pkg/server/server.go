@@ -18,6 +18,7 @@ import (
 	"net"
 
 	"istio.io/pkg/ctrlz/fw"
+	"istio.io/pkg/probe"
 
 	"istio.io/istio/galley/pkg/server/components"
 	"istio.io/istio/galley/pkg/server/process"
@@ -43,9 +44,23 @@ func New(a *settings.Args) *Server {
 	readiness := components.NewProbe(&a.Readiness)
 	s.host.Add(readiness)
 
-	if a.ValidationArgs != nil && (a.ValidationArgs.EnableValidation || a.ValidationArgs.EnableReconcileWebhookConfiguration) {
-		validation := components.NewValidation(a.KubeInterface, a.KubeConfig, a.ValidationArgs, liveness.Controller(), readiness.Controller())
-		s.host.Add(validation)
+	if a.EnableValidationServer {
+		live, ready := liveness.Controller(), readiness.Controller()
+		server := components.NewValidationServer(a.ValidationWebhookServerArgs, live, ready)
+		s.host.Add(server)
+	} else {
+		// Only the validation server controls the probes currently, so if its disable we need to set them as available.
+		livenessProbe := probe.NewProbe()
+		livenessProbe.SetAvailable(nil)
+		livenessProbe.RegisterProbe(liveness.Controller(), "liveness")
+		readinessProbe := probe.NewProbe()
+		readinessProbe.SetAvailable(nil)
+		readinessProbe.RegisterProbe(readiness.Controller(), "readiness")
+	}
+	if a.EnableValidationController ||
+		(a.EnableValidationServer && a.ValidationWebhookControllerArgs.UnregisterValidationWebhook) {
+		controller := components.NewValidationController(a.ValidationWebhookControllerArgs, a.KubeConfig)
+		s.host.Add(controller)
 	}
 
 	if a.EnableServer {

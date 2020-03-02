@@ -31,7 +31,7 @@ import (
 
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/test/util"
-	"istio.io/istio/pkg/config/schemas"
+	"istio.io/istio/pkg/config/schema/collections"
 )
 
 // execAndK8sConfigTestCase lets a test case hold some Envoy, Istio, and Kubernetes configuration
@@ -108,9 +108,9 @@ var (
 			ConfigMeta: model.ConfigMeta{
 				Name:      "ratings",
 				Namespace: "bookinfo",
-				Type:      schemas.DestinationRule.Type,
-				Group:     schemas.DestinationRule.Group,
-				Version:   schemas.DestinationRule.Version,
+				Type:      collections.IstioNetworkingV1Alpha3Destinationrules.Resource().Kind(),
+				Group:     collections.IstioNetworkingV1Alpha3Destinationrules.Resource().Group(),
+				Version:   collections.IstioNetworkingV1Alpha3Destinationrules.Resource().Version(),
 			},
 			Spec: &networking.DestinationRule{
 				Host: "ratings",
@@ -133,9 +133,9 @@ var (
 			ConfigMeta: model.ConfigMeta{
 				Name:      "bookinfo",
 				Namespace: "default",
-				Type:      schemas.VirtualService.Type,
-				Group:     schemas.VirtualService.Group,
-				Version:   schemas.VirtualService.Version,
+				Type:      collections.IstioNetworkingV1Alpha3Virtualservices.Resource().Kind(),
+				Group:     collections.IstioNetworkingV1Alpha3Virtualservices.Resource().Group(),
+				Version:   collections.IstioNetworkingV1Alpha3Virtualservices.Resource().Version(),
 			},
 			Spec: &networking.VirtualService{
 				Hosts:    []string{"*"},
@@ -610,8 +610,6 @@ func verifyExecAndK8sConfigTestCaseTestOutput(t *testing.T, c execAndK8sConfigTe
 	if c.namespace != "" {
 		namespace = c.namespace
 	}
-
-	file = "" // Clear, because we re-use
 
 	fErr := rootCmd.Execute()
 	output := out.String()

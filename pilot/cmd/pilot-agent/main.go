@@ -31,8 +31,12 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/cobra/doc"
 
+	stsserver "istio.io/istio/security/pkg/stsservice/server"
+	"istio.io/istio/security/pkg/stsservice/tokenmanager"
+
 	meshconfig "istio.io/api/mesh/v1alpha1"
 	networking "istio.io/api/networking/v1alpha3"
+	"istio.io/istio/pkg/jwt"
 	"istio.io/pkg/collateral"
 	"istio.io/pkg/env"
 	"istio.io/pkg/log"
@@ -43,30 +47,37 @@ import (
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/proxy"
 	envoyDiscovery "istio.io/istio/pilot/pkg/proxy/envoy"
+	securityModel "istio.io/istio/pilot/pkg/security/model"
 	"istio.io/istio/pilot/pkg/serviceregistry"
 	"istio.io/istio/pkg/bootstrap/option"
 	"istio.io/istio/pkg/cmd"
-	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/config/mesh"
-	"istio.io/istio/pkg/config/validation"
 	"istio.io/istio/pkg/envoy"
 	istio_agent "istio.io/istio/pkg/istio-agent"
 	"istio.io/istio/pkg/spiffe"
 	"istio.io/istio/pkg/util/gogoprotomarshal"
 )
 
-const trustworthyJWTPath = "/var/run/secrets/tokens/istio-token"
+const (
+	trustworthyJWTPath = "./var/run/secrets/tokens/istio-token"
+	localHostIPv4      = "127.0.0.1"
+	localHostIPv6      = "[::1]"
+)
 
 // TODO: Move most of this to pkg.
 
 var (
-	role          = &model.Proxy{}
-	proxyIP       string
-	registryID    serviceregistry.ProviderID
-	trustDomain   string
-	pilotIdentity string
-	mixerIdentity string
-	statusPort    uint16
+	role               = &model.Proxy{}
+	proxyIP            string
+	registryID         serviceregistry.ProviderID
+	trustDomain        string
+	pilotIdentity      string
+	mixerIdentity      string
+	statusPort         uint16
+	stsPort            int
+	tokenManagerPlugin string
+
+	meshConfigFile string
 
 	// proxy config flags (named identically)
 	configPath               string
@@ -91,7 +102,6 @@ var (
 	customConfigFile         string
 	proxyLogLevel            string
 	proxyComponentLogLevel   string
-	dnsRefreshRate           string
 	concurrency              int
 	templateFile             string
 	disableInternalTelemetry bool
@@ -120,6 +130,13 @@ var (
 		"number of attributes for stackdriver")
 	stackdriverTracingMaxNumberOfMessageEvents = env.RegisterIntVar("STACKDRIVER_TRACING_MAX_NUMBER_OF_MESSAGE_EVENTS", 200, "Sets the "+
 		"max number of message events for stackdriver")
+	pilotCertProvider = env.RegisterStringVar("PILOT_CERT_PROVIDER", "istiod",
+		"the provider of Pilot DNS certificate.").Get()
+	jwtPolicy = env.RegisterStringVar("JWT_POLICY", jwt.JWTPolicyThirdPartyJWT,
+		"The JWT validation policy.")
+	outputKeyCertToDir = env.RegisterStringVar("OUTPUT_KEY_CERT_TO_DIRECTORY", "",
+		"The output directory for the key and certificate. If empty, no output of key and certificate.").Get()
+	meshConfig = env.RegisterStringVar("MESH_CONFIG", "", "The mesh configuration").Get()
 
 	sdsUdsWaitTimeout = time.Minute
 
@@ -206,153 +223,53 @@ var (
 				tlsClientCertChain, tlsClientKey, tlsClientRootCert,
 			}
 
-			proxyConfig := mesh.DefaultProxyConfig()
-
-			// set all flags
-			proxyConfig.CustomConfigFile = customConfigFile
-			proxyConfig.ConfigPath = configPath
-			proxyConfig.BinaryPath = binaryPath
-			proxyConfig.ServiceCluster = serviceCluster
-			proxyConfig.DrainDuration = types.DurationProto(drainDuration)
-			proxyConfig.ParentShutdownDuration = types.DurationProto(parentShutdownDuration)
-			proxyConfig.DiscoveryAddress = discoveryAddress
-			proxyConfig.ConnectTimeout = types.DurationProto(connectTimeout)
-			proxyConfig.StatsdUdpAddress = statsdUDPAddress
-			if envoyMetricsService != "" {
-				if ms := fromJSON(envoyMetricsService); ms != nil {
-					proxyConfig.EnvoyMetricsService = ms
-					appendTLSCerts(ms)
-				}
-			}
-			if envoyAccessLogService != "" {
-				if rs := fromJSON(envoyAccessLogService); rs != nil {
-					proxyConfig.EnvoyAccessLogService = rs
-					appendTLSCerts(rs)
-				}
-			}
-			proxyConfig.ProxyAdminPort = int32(proxyAdminPort)
-			proxyConfig.Concurrency = int32(concurrency)
-
-			var pilotSAN []string
-			controlPlaneAuthEnabled := false
-			ns := ""
-			switch controlPlaneAuthPolicy {
-			case meshconfig.AuthenticationPolicy_NONE.String():
-				proxyConfig.ControlPlaneAuthPolicy = meshconfig.AuthenticationPolicy_NONE
-			case meshconfig.AuthenticationPolicy_MUTUAL_TLS.String():
-				controlPlaneAuthEnabled = true
-				proxyConfig.ControlPlaneAuthPolicy = meshconfig.AuthenticationPolicy_MUTUAL_TLS
-				if registryID == serviceregistry.Kubernetes {
-					partDiscoveryAddress := strings.Split(discoveryAddress, ":")
-					discoveryHostname := partDiscoveryAddress[0]
-					parts := strings.Split(discoveryHostname, ".")
-					if len(parts) == 1 {
-						// namespace of pilot is not part of discovery address use
-						// pod namespace e.g. istio-pilot:15005
-						ns = podNamespace
-					} else if len(parts) == 2 {
-						// namespace is found in the discovery address
-						// e.g. istio-pilot.istio-system:15005
-						ns = parts[1]
-					} else {
-						// discovery address is a remote address. For remote clusters
-						// only support the default config, or env variable
-						ns = istioNamespaceVar.Get()
-						if ns == "" {
-							ns = constants.IstioSystemNamespace
-						}
-					}
-				}
-			}
-
 			role.DNSDomain = getDNSDomain(podNamespace, role.DNSDomain)
 			setSpiffeTrustDomain(podNamespace, role.DNSDomain)
 
-			// Obtain the Pilot and Mixer SANs. Used below to create a Envoy proxy.
-			pilotSAN = getSAN(ns, envoyDiscovery.PilotSvcAccName, pilotIdentity)
-			log.Infof("PilotSAN %#v", pilotSAN)
-			mixerSAN := getSAN(ns, envoyDiscovery.MixerSvcAccName, mixerIdentity)
-			log.Infof("MixerSAN %#v", mixerSAN)
-
-			// resolve statsd address
-			if proxyConfig.StatsdUdpAddress != "" {
-				addr, err := proxy.ResolveAddr(proxyConfig.StatsdUdpAddress)
-				if err != nil {
-					// If istio-mixer.istio-system can't be resolved, skip generating the statsd config.
-					// (instead of crashing). Mixer is optional.
-					log.Warnf("resolve StatsdUdpAddress failed: %v", err)
-					proxyConfig.StatsdUdpAddress = ""
-				} else {
-					proxyConfig.StatsdUdpAddress = addr
-				}
+			proxyConfig, err := constructProxyConfig()
+			if err != nil {
+				return fmt.Errorf("failed to get proxy config: %v", err)
 			}
-
-			// set tracing config
-			if lightstepAddress != "" {
-				proxyConfig.Tracing = &meshconfig.Tracing{
-					Tracer: &meshconfig.Tracing_Lightstep_{
-						Lightstep: &meshconfig.Tracing_Lightstep{
-							Address:     lightstepAddress,
-							AccessToken: lightstepAccessToken,
-							Secure:      lightstepSecure,
-							CacertPath:  lightstepCacertPath,
-						},
-					},
-				}
-			} else if zipkinAddress != "" {
-				proxyConfig.Tracing = &meshconfig.Tracing{
-					Tracer: &meshconfig.Tracing_Zipkin_{
-						Zipkin: &meshconfig.Tracing_Zipkin{
-							Address: zipkinAddress,
-						},
-					},
-				}
-			} else if datadogAgentAddress != "" {
-				proxyConfig.Tracing = &meshconfig.Tracing{
-					Tracer: &meshconfig.Tracing_Datadog_{
-						Datadog: &meshconfig.Tracing_Datadog{
-							Address: datadogAgentAddress,
-						},
-					},
-				}
-			} else if stackdriverTracingEnabled.Get() {
-				proxyConfig.Tracing = &meshconfig.Tracing{
-					Tracer: &meshconfig.Tracing_Stackdriver_{
-						Stackdriver: &meshconfig.Tracing_Stackdriver{
-							Debug: stackdriverTracingDebug.Get(),
-							MaxNumberOfAnnotations: &types.Int64Value{
-								Value: int64(stackdriverTracingMaxNumberOfAnnotations.Get()),
-							},
-							MaxNumberOfAttributes: &types.Int64Value{
-								Value: int64(stackdriverTracingMaxNumberOfAttributes.Get()),
-							},
-							MaxNumberOfMessageEvents: &types.Int64Value{
-								Value: int64(stackdriverTracingMaxNumberOfMessageEvents.Get()),
-							},
-						},
-					},
-				}
-			}
-
-			if err := validation.ValidateProxyConfig(&proxyConfig); err != nil {
-				return err
-			}
-
 			if out, err := gogoprotomarshal.ToYAML(&proxyConfig); err != nil {
 				log.Infof("Failed to serialize to YAML: %v", err)
 			} else {
 				log.Infof("Effective config: %s", out)
 			}
 
+			// Obtain the Pilot and Mixer SANs. Used below to create a Envoy proxy.
+			pilotSAN := getSAN(getControlPlaneNamespace(podNamespace, proxyConfig.DiscoveryAddress), envoyDiscovery.PilotSvcAccName, pilotIdentity)
+			log.Infof("PilotSAN %#v", pilotSAN)
+			mixerSAN := getSAN(getControlPlaneNamespace(podNamespace, proxyConfig.DiscoveryAddress), envoyDiscovery.MixerSvcAccName, mixerIdentity)
+			log.Infof("MixerSAN %#v", mixerSAN)
+
+			controlPlaneAuthEnabled := controlPlaneAuthPolicy == meshconfig.AuthenticationPolicy_MUTUAL_TLS.String()
+			if controlPlaneAuthEnabled {
+				proxyConfig.ControlPlaneAuthPolicy = meshconfig.AuthenticationPolicy_MUTUAL_TLS
+			} else {
+				proxyConfig.ControlPlaneAuthPolicy = meshconfig.AuthenticationPolicy_NONE
+			}
+
 			// Legacy - so pilot-agent can be used with citadel node agent.
 			// Main will be replaced by istio-agent when we clean up - this code can stay here and be removed with the rest.
 			sdsUDSPath := sdsUdsPathVar.Get()
-			nodeAgentSDSEnabled, sdsTokenPath := detectSds(controlPlaneBootstrap, sdsUDSPath, trustworthyJWTPath)
+			var jwtPath string
+			if jwtPolicy.Get() == jwt.JWTPolicyThirdPartyJWT {
+				log.Info("JWT policy is third-party-jwt")
+				jwtPath = trustworthyJWTPath
+			} else if jwtPolicy.Get() == jwt.JWTPolicyFirstPartyJWT {
+				log.Info("JWT policy is first-party-jwt")
+				jwtPath = securityModel.K8sSAJwtFileName
+			} else {
+				err := fmt.Errorf("invalid JWT policy %v", jwtPolicy.Get())
+				log.Errorf("%v", err)
+				return err
+			}
+			nodeAgentSDSEnabled, sdsTokenPath := detectSds(controlPlaneBootstrap, sdsUDSPath, jwtPath)
 
 			if !nodeAgentSDSEnabled { // Not using citadel agent - this is either Pilot or Istiod.
 
 				// Istiod and new SDS-only mode doesn't use sdsUdsPathVar - sdsEnabled will be false.
-				sa := istio_agent.NewSDSAgent(discoveryAddress, controlPlaneAuthEnabled)
+				sa := istio_agent.NewSDSAgent(proxyConfig.DiscoveryAddress, controlPlaneAuthEnabled, pilotCertProvider, jwtPath, outputKeyCertToDir)
 
 				if sa.JWTPath != "" {
 					// If user injected a JWT token for SDS - use SDS.
@@ -419,6 +336,11 @@ var (
 						option.SDSUDSPath(sdsUDSPath),
 					}
 
+					if stsPort > 0 {
+						opts = append(opts, option.STSEnabled(true),
+							option.STSPort(stsPort))
+					}
+
 					// Check if nodeIP carries IPv4 or IPv6 and set up proxy accordingly
 					if proxyIPv6 {
 						opts = append(opts, option.Localhost(option.LocalhostIPv6),
@@ -458,9 +380,9 @@ var (
 			ctx, cancel := context.WithCancel(context.Background())
 			// If a status port was provided, start handling status probes.
 			if statusPort > 0 {
-				localHostAddr := "127.0.0.1"
+				localHostAddr := localHostIPv4
 				if proxyIPv6 {
-					localHostAddr = "[::1]"
+					localHostAddr = localHostIPv6
 				}
 				prober := kubeAppProberNameVar.Get()
 				statusServer, err := status.NewServer(status.Config{
@@ -477,7 +399,26 @@ var (
 				go waitForCompletion(ctx, statusServer.Run)
 			}
 
-			log.Infof("PilotSAN %#v", pilotSAN)
+			// If security token service (STS) port is not zero, start STS server and
+			// listen on STS port for STS requests. For STS, see
+			// https://tools.ietf.org/html/draft-ietf-oauth-token-exchange-16.
+			if stsPort > 0 {
+				localHostAddr := localHostIPv4
+				if proxyIPv6 {
+					localHostAddr = localHostIPv6
+				}
+				tokenManager := tokenmanager.CreateTokenManager(tokenManagerPlugin,
+					tokenmanager.Config{TrustDomain: trustDomain})
+				stsServer, err := stsserver.NewServer(stsserver.Config{
+					LocalHostAddr: localHostAddr,
+					LocalPort:     stsPort,
+				}, tokenManager)
+				if err != nil {
+					cancel()
+					return err
+				}
+				defer stsServer.Stop()
+			}
 
 			envoyProxy := envoy.NewProxy(envoy.ProxyConfig{
 				Config:              proxyConfig,
@@ -487,20 +428,21 @@ var (
 				PilotSubjectAltName: pilotSAN,
 				MixerSubjectAltName: mixerSAN,
 				NodeIPs:             role.IPAddresses,
-				DNSRefreshRate:      dnsRefreshRate,
 				PodName:             podName,
 				PodNamespace:        podNamespace,
 				PodIP:               podIP,
 				SDSUDSPath:          sdsUDSPath,
 				SDSTokenPath:        sdsTokenPath,
+				STSPort:             stsPort,
 				ControlPlaneAuth:    controlPlaneAuthEnabled,
 				DisableReportCalls:  disableInternalTelemetry,
 				OutlierLogPath:      outlierLogPath,
+				PilotCertProvider:   pilotCertProvider,
 			})
 
 			agent := envoy.NewAgent(envoyProxy, features.TerminationDrainDuration())
 
-			if nodeAgentSDSEnabled && role.Type == model.SidecarProxy {
+			if nodeAgentSDSEnabled {
 				tlsCertsToWatch = []string{}
 			}
 
@@ -515,6 +457,31 @@ var (
 		},
 	}
 )
+
+// getMeshConfig gets the mesh config to use for proxy configuration
+// 1. Search for MESH_CONFIG env var. This is set in the injection template
+// 2. Attempt to read --meshConfigFile. This is used for gateways
+// 3. If neither is found, we can fallback to default settings
+func getMeshConfig() (meshconfig.MeshConfig, error) {
+	defaultConfig := mesh.DefaultMeshConfig()
+	if meshConfig != "" {
+		mc, err := mesh.ApplyMeshConfig(meshConfig, defaultConfig)
+		if err != nil || mc == nil {
+			return meshconfig.MeshConfig{}, fmt.Errorf("failed to unmarshal mesh config config [%v]: %v", meshConfig, err)
+		}
+		return *mc, nil
+	}
+	b, err := ioutil.ReadFile(meshConfigFile)
+	if err != nil {
+		log.Warnf("Failed to read mesh config file from %v or MESH_CONFIG. Falling back to defaults: %v", meshConfigFile, err)
+		return defaultConfig, nil
+	}
+	mc, err := mesh.ApplyMeshConfig(string(b), defaultConfig)
+	if err != nil || mc == nil {
+		return meshconfig.MeshConfig{}, fmt.Errorf("failed to unmarshal mesh config config [%v]: %v", string(b), err)
+	}
+	return *mc, nil
+}
 
 // dedupes the string array and also ignores the empty string.
 func dedupeStrings(in []string) []string {
@@ -585,7 +552,7 @@ func getDNSDomain(podNamespace, domain string) string {
 }
 
 // detectSds checks if the SDS address (when it is UDS) and JWT paths are present.
-func detectSds(controlPlaneBootstrap bool, sdsAddress, trustworthyJWTPath string) (bool, string) {
+func detectSds(controlPlaneBootstrap bool, sdsAddress, jwtPath string) (bool, string) {
 	if !sdsEnabledVar.Get() {
 		return false, ""
 	}
@@ -594,7 +561,7 @@ func detectSds(controlPlaneBootstrap bool, sdsAddress, trustworthyJWTPath string
 		return false, ""
 	}
 
-	if _, err := os.Stat(trustworthyJWTPath); err != nil {
+	if _, err := os.Stat(jwtPath); err != nil {
 		return false, ""
 	}
 
@@ -607,7 +574,7 @@ func detectSds(controlPlaneBootstrap bool, sdsAddress, trustworthyJWTPath string
 			return false, ""
 		}
 	} else {
-		return true, trustworthyJWTPath
+		return true, jwtPath
 	}
 
 	if !controlPlaneBootstrap {
@@ -617,7 +584,7 @@ func detectSds(controlPlaneBootstrap bool, sdsAddress, trustworthyJWTPath string
 			return false, ""
 		}
 
-		return true, trustworthyJWTPath
+		return true, jwtPath
 	}
 
 	// controlplane components like pilot/mixer/galley have sidecar
@@ -627,7 +594,7 @@ func detectSds(controlPlaneBootstrap bool, sdsAddress, trustworthyJWTPath string
 		return false, ""
 	}
 
-	return true, trustworthyJWTPath
+	return true, jwtPath
 }
 
 func timeDuration(dur *types.Duration) time.Duration {
@@ -664,8 +631,8 @@ func appendTLSCerts(rs *meshconfig.RemoteService) {
 func init() {
 	proxyCmd.PersistentFlags().StringVar((*string)(&registryID), "serviceregistry",
 		string(serviceregistry.Kubernetes),
-		fmt.Sprintf("Select the platform for service registry, options are {%s, %s, %s, %s}",
-			serviceregistry.Kubernetes, serviceregistry.Consul, serviceregistry.MCP, serviceregistry.Mock))
+		fmt.Sprintf("Select the platform for service registry, options are {%s, %s, %s}",
+			serviceregistry.Kubernetes, serviceregistry.Consul, serviceregistry.Mock))
 	proxyCmd.PersistentFlags().StringVar(&proxyIP, "ip", "",
 		"Proxy IP address. If not provided uses ${INSTANCE_IP} environment variable.")
 	proxyCmd.PersistentFlags().StringVar(&role.ID, "id", "",
@@ -679,9 +646,14 @@ func init() {
 	proxyCmd.PersistentFlags().StringVar(&mixerIdentity, "mixerIdentity", "",
 		"The identity used as the suffix for mixer's spiffe SAN. This would only be used by pilot all other proxy would get this value from pilot")
 
+	proxyCmd.PersistentFlags().StringVar(&meshConfigFile, "meshConfig", "/etc/istio/config/mesh",
+		"File name for Istio mesh configuration. If not specified, a default mesh will be used. MESH_CONFIG environment variable takes precedence.")
 	proxyCmd.PersistentFlags().Uint16Var(&statusPort, "statusPort", 0,
 		"HTTP Port on which to serve pilot agent status. If zero, agent status will not be provided.")
-
+	proxyCmd.PersistentFlags().IntVar(&stsPort, "stsPort", 0,
+		"HTTP Port on which to serve Security Token Service (STS). If zero, STS service will not be provided.")
+	proxyCmd.PersistentFlags().StringVar(&tokenManagerPlugin, "tokenManagerPlugin", tokenmanager.GoogleTokenExchange,
+		"Token provider specific plugin name.")
 	// Flags for proxy configuration
 	values := mesh.DefaultProxyConfig()
 	proxyCmd.PersistentFlags().StringVar(&configPath, "configPath", values.ConfigPath,
@@ -696,7 +668,8 @@ func init() {
 	proxyCmd.PersistentFlags().DurationVar(&parentShutdownDuration, "parentShutdownDuration",
 		timeDuration(values.ParentShutdownDuration),
 		"The time in seconds that Envoy will wait before shutting down the parent process during a hot restart")
-	proxyCmd.PersistentFlags().StringVar(&discoveryAddress, "discoveryAddress", values.DiscoveryAddress,
+	// TODO remove this flag entirely once ingress can read mesh config
+	proxyCmd.PersistentFlags().StringVar(&discoveryAddress, "discoveryAddress", "",
 		"Address of the discovery service exposing xDS (e.g. istio-pilot:8080)")
 	proxyCmd.PersistentFlags().StringVar(&zipkinAddress, "zipkinAddress", "",
 		"Address of the Zipkin service (e.g. zipkin:9411)")
@@ -732,8 +705,6 @@ func init() {
 	// See https://www.envoyproxy.io/docs/envoy/latest/operations/cli#cmdoption-component-log-level
 	proxyCmd.PersistentFlags().StringVar(&proxyComponentLogLevel, "proxyComponentLogLevel", "misc:error",
 		"The component log level used to start the Envoy proxy")
-	proxyCmd.PersistentFlags().StringVar(&dnsRefreshRate, "dnsRefreshRate", "300s",
-		"The dns_refresh_rate for bootstrap STRICT_DNS clusters")
 	proxyCmd.PersistentFlags().IntVar(&concurrency, "concurrency", int(values.Concurrency),
 		"number of worker threads to run")
 	proxyCmd.PersistentFlags().StringVar(&templateFile, "templateFile", "",

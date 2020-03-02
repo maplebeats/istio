@@ -17,11 +17,15 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"time"
+
+	"istio.io/istio/galley/pkg/config/analysis/msg"
+	"istio.io/istio/galley/pkg/config/processing/snapshotter"
 
 	"github.com/ghodss/yaml"
 	"github.com/mattn/go-isatty"
@@ -33,27 +37,31 @@ import (
 	"istio.io/istio/galley/pkg/config/analysis/analyzers"
 	"istio.io/istio/galley/pkg/config/analysis/diag"
 	"istio.io/istio/galley/pkg/config/analysis/local"
-	"istio.io/istio/galley/pkg/config/meta/metadata"
-	"istio.io/istio/galley/pkg/config/resource"
 	cfgKube "istio.io/istio/galley/pkg/config/source/kube"
 	"istio.io/istio/istioctl/pkg/util/handlers"
+	"istio.io/istio/pkg/config/resource"
+	"istio.io/istio/pkg/config/schema"
 	"istio.io/istio/pkg/kube"
 )
 
+// AnalyzerFoundIssuesError indicates that at least one analyzer found problems.
 type AnalyzerFoundIssuesError struct{}
+
+// FileParseError indicates a provided file was unable to be parsed.
 type FileParseError struct{}
 
 const (
-	NoIssuesString   = "\u2714 No validation issues found."
-	FoundIssueString = "Analyzers found issues."
-	FileParseString  = "Some files couldn't be parsed."
-	LogOutput        = "log"
-	JSONOutput       = "json"
-	YamlOutput       = "yaml"
+	FileParseString = "Some files couldn't be parsed."
+	LogOutput       = "log"
+	JSONOutput      = "json"
+	YamlOutput      = "yaml"
 )
 
 func (f AnalyzerFoundIssuesError) Error() string {
-	return fmt.Sprintf("%s\nSee %s for more information about causes and resolutions.", FoundIssueString, diag.DocPrefix)
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Analyzers found issues when analyzing %s.\n", analyzeTargetAsString()))
+	sb.WriteString(fmt.Sprintf("See %s for more information about causes and resolutions.", diag.DocPrefix))
+	return sb.String()
 }
 
 func (f FileParseError) Error() string {
@@ -61,14 +69,18 @@ func (f FileParseError) Error() string {
 }
 
 var (
-	listAnalyzers   bool
-	useKube         bool
-	failureLevel    = messageThreshold{diag.Warning} // messages at least this level will generate an error exit code
-	outputLevel     = messageThreshold{diag.Info}    // messages at least this level will be included in the output
-	colorize        bool
-	msgOutputFormat string
-	meshCfgFile     string
-	allNamespaces   bool
+	listAnalyzers     bool
+	useKube           bool
+	failureLevel      = messageThreshold{diag.Warning} // messages at least this level will generate an error exit code
+	outputLevel       = messageThreshold{diag.Info}    // messages at least this level will be included in the output
+	colorize          bool
+	msgOutputFormat   string
+	meshCfgFile       string
+	selectedNamespace string
+	allNamespaces     bool
+	suppress          []string
+	analysisTimeout   time.Duration
+	recursive         bool
 
 	termEnvVar = env.RegisterStringVar("TERM", "", "Specifies terminal type.  Use 'dumb' to suppress color output")
 
@@ -97,10 +109,20 @@ func Analyze() *cobra.Command {
 istioctl analyze
 
 # Analyze the current live cluster, simulating the effect of applying additional yaml files
-istioctl analyze a.yaml b.yaml
+istioctl analyze a.yaml b.yaml my-app-config/
+
+# Analyze the current live cluster, simulating the effect of applying a directory of config recursively
+istioctl analyze --recursive my-istio-config/
 
 # Analyze yaml files without connecting to a live cluster
-istioctl analyze --use-kube=false a.yaml b.yaml
+istioctl analyze --use-kube=false a.yaml b.yaml my-app-config/
+
+# Analyze the current live cluster and suppress PodMissingProxy for pod mypod in namespace 'testing'.
+istioctl analyze -S "IST0103=Pod mypod.testing"
+
+# Analyze the current live cluster and suppress PodMissingProxy for all pods in namespace 'testing',
+# and suppress MisplacedAnnotation on deployment foobar in namespace default.
+istioctl analyze -S "IST0103=Pod *.testing" -S "IST0107=Deployment foobar.default"
 
 # List available analyzers
 istioctl analyze -L
@@ -127,9 +149,44 @@ istioctl analyze -L
 
 			// We use the "namespace" arg that's provided as part of root istioctl as a flag for specifying what namespace to use
 			// for file resources that don't have one specified.
-			selectedNamespace := handlers.HandleNamespace(namespace, defaultNamespace)
+			selectedNamespace = handlers.HandleNamespace(namespace, defaultNamespace)
 
-			var k cfgKube.Interfaces
+			// If we've explicitly asked for all namespaces, blank the selectedNamespace var out
+			if allNamespaces {
+				selectedNamespace = ""
+			}
+
+			sa := local.NewSourceAnalyzer(schema.MustGet(), analyzers.AllCombined(),
+				resource.Namespace(selectedNamespace), resource.Namespace(istioNamespace), nil, true, analysisTimeout)
+
+			// Check for suppressions and add them to our SourceAnalyzer
+			var suppressions []snapshotter.AnalysisSuppression
+			for _, s := range suppress {
+				parts := strings.Split(s, "=")
+				if len(parts) != 2 {
+					return fmt.Errorf("%s is not a valid suppression value. See istioctl analyze --help", s)
+				}
+				// Check to see if the supplied code is valid. If not, emit a
+				// warning but continue.
+				codeIsValid := false
+				for _, at := range msg.All() {
+					if at.Code() == parts[0] {
+						codeIsValid = true
+						break
+					}
+				}
+
+				if !codeIsValid {
+					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: Supplied message code '%s' is an unknown message code and will not have any effect.\n", parts[0])
+				}
+				suppressions = append(suppressions, snapshotter.AnalysisSuppression{
+					Code:         parts[0],
+					ResourceName: parts[1],
+				})
+			}
+			sa.SetSuppressions(suppressions)
+
+			// If we're using kube, use that as a base source.
 			if useKube {
 				// Set up the kube client
 				config := kube.BuildClientCmd(kubeconfig, configContext)
@@ -137,20 +194,22 @@ istioctl analyze -L
 				if err != nil {
 					return err
 				}
-				k = cfgKube.NewInterfaces(restConfig)
-			}
-
-			// If we've explicitly asked for all namespaces, blank the selectedNamespace var out
-			if allNamespaces {
-				selectedNamespace = ""
-			}
-
-			sa := local.NewSourceAnalyzer(metadata.MustGet(), analyzers.AllCombined(),
-				resource.Namespace(selectedNamespace), resource.Namespace(istioNamespace), nil, true)
-
-			// If we're using kube, use that as a base source.
-			if k != nil {
+				k := cfgKube.NewInterfaces(restConfig)
 				sa.AddRunningKubeSource(k)
+			}
+
+			// If we explicitly specify mesh config, use it.
+			// This takes precedence over default mesh config or mesh config from a running Kube instance.
+			if meshCfgFile != "" {
+				_ = sa.AddFileKubeMeshConfig(meshCfgFile)
+			}
+
+			// If we're not using kube (files only), add defaults for some resources we expect to be provided by Istio
+			if !useKube {
+				err := sa.AddDefaultResources()
+				if err != nil {
+					return err
+				}
 			}
 
 			// If files are provided, treat them (collectively) as a source.
@@ -162,25 +221,16 @@ istioctl analyze -L
 				}
 			}
 
-			// If we explicitly specify mesh config, use it.
-			// This takes precedence over default mesh config or mesh config from a running Kube instance.
-			if meshCfgFile != "" {
-				_ = sa.AddFileKubeMeshConfigSource(meshCfgFile)
-			}
-
 			// Do the analysis
 			result, err := sa.Analyze(cancel)
+
 			if err != nil {
 				return err
 			}
 
 			// Maybe output details about which analyzers ran
 			if verbose {
-				if allNamespaces {
-					fmt.Fprintln(cmd.ErrOrStderr(), "Analyzed resources in all namespaces")
-				} else {
-					fmt.Fprintln(cmd.ErrOrStderr(), "Analyzed resources in namespace:", selectedNamespace)
-				}
+				fmt.Fprintf(cmd.ErrOrStderr(), "Analyzed resources in %s\n", analyzeTargetAsString())
 
 				if len(result.SkippedAnalyzers) > 0 {
 					fmt.Fprintln(cmd.ErrOrStderr(), "Skipped analyzers:")
@@ -211,14 +261,15 @@ istioctl analyze -L
 				// Print validation message output, or a line indicating that none were found
 				if len(outputMessages) == 0 {
 					if parseErrors == 0 {
-						fmt.Fprintln(cmd.ErrOrStderr(), NoIssuesString)
+						fmt.Fprintf(cmd.ErrOrStderr(), "\u2714 No validation issues found when analyzing %s.\n", analyzeTargetAsString())
 					} else {
 						fileOrFiles := "files"
 						if parseErrors == 1 {
 							fileOrFiles = "file"
 						}
 						fmt.Fprintf(cmd.ErrOrStderr(),
-							"No validation issues found (but %d %s could not be parsed)\n",
+							"No validation issues found when analyzing %s (but %d %s could not be parsed).\n",
+							analyzeTargetAsString(),
 							parseErrors,
 							fileOrFiles,
 						)
@@ -272,29 +323,88 @@ istioctl analyze -L
 		"Overrides the mesh config values to use for analysis.")
 	analysisCmd.PersistentFlags().BoolVarP(&allNamespaces, "all-namespaces", "A", false,
 		"Analyze all namespaces")
+	analysisCmd.PersistentFlags().StringArrayVarP(&suppress, "suppress", "S", []string{},
+		"Suppress reporting a message code on a specific resource. Values are supplied in the form "+
+			`<code>=<resource> (e.g. '--suppress "IST0102=DestinationRule primary-dr.default"'). Can be repeated. `+
+			`You can include the wildcard character '*' to support a partial match (e.g. '--suppress "IST0102=DestinationRule *.default" ).`)
+	analysisCmd.PersistentFlags().DurationVar(&analysisTimeout, "timeout", 30*time.Second,
+		"the duration to wait before failing")
+	analysisCmd.PersistentFlags().BoolVarP(&recursive, "recursive", "R", false,
+		"Process directory arguments recursively. Useful when you want to analyze related manifests organized within the same directory.")
 	return analysisCmd
 }
 
-func gatherFiles(args []string) ([]io.Reader, error) {
-	var readers []io.Reader
-	var r *os.File
-	var err error
+func gatherFiles(args []string) ([]local.ReaderSource, error) {
+	var readers []local.ReaderSource
 	for _, f := range args {
+		var r *os.File
+
+		// Handle "-" as stdin as a special case.
 		if f == "-" {
 			if isatty.IsTerminal(os.Stdin.Fd()) {
 				fmt.Fprint(os.Stderr, "Reading from stdin:\n")
 			}
 			r = os.Stdin
-		} else {
-			r, err = os.Open(f)
+			readers = append(readers, local.ReaderSource{Name: f, Reader: r})
+			continue
+		}
+
+		fi, err := os.Stat(f)
+		if err != nil {
+			return nil, err
+		}
+
+		if fi.IsDir() {
+			dirReaders, err := gatherFilesInDirectory(f)
 			if err != nil {
 				return nil, err
 			}
-			runtime.SetFinalizer(r, func(x *os.File) { x.Close() })
+			readers = append(readers, dirReaders...)
+		} else {
+			rs, err := gatherFile(f)
+			if err != nil {
+				return nil, err
+			}
+			readers = append(readers, rs)
 		}
-		readers = append(readers, r)
 	}
 	return readers, nil
+}
+
+func gatherFile(f string) (local.ReaderSource, error) {
+	r, err := os.Open(f)
+	if err != nil {
+		return local.ReaderSource{}, err
+	}
+	runtime.SetFinalizer(r, func(x *os.File) { x.Close() })
+	return local.ReaderSource{Name: f, Reader: r}, nil
+}
+
+func gatherFilesInDirectory(dir string) ([]local.ReaderSource, error) {
+	var readers []local.ReaderSource
+
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		// If we encounter a directory, recurse only if the --recursve option
+		// was provided and the directory is not the same as dir.
+		if info.IsDir() {
+			if !recursive && dir != path {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		r, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		runtime.SetFinalizer(r, func(x *os.File) { x.Close() })
+		readers = append(readers, local.ReaderSource{Name: path, Reader: r})
+		return nil
+	})
+	return readers, err
 }
 
 func colorPrefix(m diag.Message) string {
@@ -320,8 +430,8 @@ func colorSuffix() string {
 
 func renderMessage(m diag.Message) string {
 	origin := ""
-	if m.Origin != nil {
-		origin = " (" + m.Origin.FriendlyName() + ")"
+	if m.Resource != nil {
+		origin = " (" + m.Resource.Origin.FriendlyName() + ")"
 	}
 	return fmt.Sprintf(
 		"%s%v%s [%v]%s %s", colorPrefix(m), m.Type.Level(), colorSuffix(), m.Type.Code(), origin, fmt.Sprintf(m.Type.Template(), m.Parameters...))
@@ -408,4 +518,11 @@ func AnalyzersAsString(analyzers []analysis.Analyzer) string {
 		}
 	}
 	return b.String()
+}
+
+func analyzeTargetAsString() string {
+	if allNamespaces {
+		return "all namespaces"
+	}
+	return fmt.Sprintf("namespace: %s", selectedNamespace)
 }

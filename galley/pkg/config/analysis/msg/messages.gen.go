@@ -5,7 +5,7 @@ package msg
 
 import (
 	"istio.io/istio/galley/pkg/config/analysis/diag"
-	"istio.io/istio/galley/pkg/config/resource"
+	"istio.io/istio/pkg/config/resource"
 )
 
 var (
@@ -33,9 +33,9 @@ var (
 	// Description: Unhandled gateway port
 	GatewayPortNotOnWorkload = diag.NewMessageType(diag.Warning, "IST0104", "The gateway refers to a port that is not exposed on the workload (pod selector %s; port %d)")
 
-	// IstioProxyVersionMismatch defines a diag.MessageType for message "IstioProxyVersionMismatch".
-	// Description: The version of the Istio proxy running on the pod does not match the version used by the istio injector.
-	IstioProxyVersionMismatch = diag.NewMessageType(diag.Warning, "IST0105", "The version of the Istio proxy running on the pod does not match the version used by the istio injector (pod version: %s; injector version: %s). This often happens after upgrading the Istio control-plane and can be fixed by redeploying the pod.")
+	// IstioProxyImageMismatch defines a diag.MessageType for message "IstioProxyImageMismatch".
+	// Description: The image of the Istio proxy running on the pod does not match the image defined in the injection configuration.
+	IstioProxyImageMismatch = diag.NewMessageType(diag.Warning, "IST0105", "The image of the Istio proxy running on the pod does not match the image defined in the injection configuration (pod image: %s; injection configuration image: %s). This often happens after upgrading the Istio control-plane and can be fixed by redeploying the pod.")
 
 	// SchemaValidationError defines a diag.MessageType for message "SchemaValidationError".
 	// Description: The resource has a schema validation error.
@@ -88,13 +88,54 @@ var (
 	// PortNameIsNotUnderNamingConvention defines a diag.MessageType for message "PortNameIsNotUnderNamingConvention".
 	// Description: Port name is not under naming convention. Protocol detection is applied to the port.
 	PortNameIsNotUnderNamingConvention = diag.NewMessageType(diag.Info, "IST0118", "Port name %s (port: %d, targetPort: %s) doesn't follow the naming convention of Istio port.")
+
+	// JwtFailureDueToInvalidServicePortPrefix defines a diag.MessageType for message "JwtFailureDueToInvalidServicePortPrefix".
+	// Description: Authentication policy with JWT targets Service with invalid port specification.
+	JwtFailureDueToInvalidServicePortPrefix = diag.NewMessageType(diag.Warning, "IST0119", "Authentication policy with JWT targets Service with invalid port specification (port: %d, name: %s, protocol: %s, targetPort: %s).")
+
+	// PolicyResourceIsDeprecated defines a diag.MessageType for message "PolicyResourceIsDeprecated".
+	// Description: The Policy resource is deprecated and will be removed in a future Istio release. Migrate to the PeerAuthentication resource.
+	PolicyResourceIsDeprecated = diag.NewMessageType(diag.Info, "IST0120", "The Policy resource is deprecated and will be removed in a future Istio release. Migrate to the PeerAuthentication resource.")
+
+	// MeshPolicyResourceIsDeprecated defines a diag.MessageType for message "MeshPolicyResourceIsDeprecated".
+	// Description: The MeshPolicy resource is deprecated and will be removed in a future Istio release. Migrate to the PeerAuthentication resource.
+	MeshPolicyResourceIsDeprecated = diag.NewMessageType(diag.Info, "IST0121", "The MeshPolicy resource is deprecated and will be removed in a future Istio release. Migrate to the PeerAuthentication resource.")
 )
+
+// All returns a list of all known message types.
+func All() []*diag.MessageType {
+	return []*diag.MessageType{
+		InternalError,
+		Deprecated,
+		ReferencedResourceNotFound,
+		NamespaceNotInjected,
+		PodMissingProxy,
+		GatewayPortNotOnWorkload,
+		IstioProxyImageMismatch,
+		SchemaValidationError,
+		MisplacedAnnotation,
+		UnknownAnnotation,
+		ConflictingMeshGatewayVirtualServiceHosts,
+		ConflictingSidecarWorkloadSelectors,
+		MultipleSidecarsWithoutWorkloadSelectors,
+		VirtualServiceDestinationPortSelectorRequired,
+		MTLSPolicyConflict,
+		PolicySpecifiesPortNameThatDoesntExist,
+		DestinationRuleUsesMTLSForWorkloadWithoutSidecar,
+		DeploymentAssociatedToMultipleServices,
+		DeploymentRequiresServiceAssociated,
+		PortNameIsNotUnderNamingConvention,
+		JwtFailureDueToInvalidServicePortPrefix,
+		PolicyResourceIsDeprecated,
+		MeshPolicyResourceIsDeprecated,
+	}
+}
 
 // NewInternalError returns a new diag.Message based on InternalError.
 func NewInternalError(r *resource.Instance, detail string) diag.Message {
 	return diag.NewMessage(
 		InternalError,
-		originOrNil(r),
+		r,
 		detail,
 	)
 }
@@ -103,7 +144,7 @@ func NewInternalError(r *resource.Instance, detail string) diag.Message {
 func NewDeprecated(r *resource.Instance, detail string) diag.Message {
 	return diag.NewMessage(
 		Deprecated,
-		originOrNil(r),
+		r,
 		detail,
 	)
 }
@@ -112,7 +153,7 @@ func NewDeprecated(r *resource.Instance, detail string) diag.Message {
 func NewReferencedResourceNotFound(r *resource.Instance, reftype string, refval string) diag.Message {
 	return diag.NewMessage(
 		ReferencedResourceNotFound,
-		originOrNil(r),
+		r,
 		reftype,
 		refval,
 	)
@@ -122,7 +163,7 @@ func NewReferencedResourceNotFound(r *resource.Instance, reftype string, refval 
 func NewNamespaceNotInjected(r *resource.Instance, namespace string, namespace2 string) diag.Message {
 	return diag.NewMessage(
 		NamespaceNotInjected,
-		originOrNil(r),
+		r,
 		namespace,
 		namespace2,
 	)
@@ -132,7 +173,7 @@ func NewNamespaceNotInjected(r *resource.Instance, namespace string, namespace2 
 func NewPodMissingProxy(r *resource.Instance) diag.Message {
 	return diag.NewMessage(
 		PodMissingProxy,
-		originOrNil(r),
+		r,
 	)
 }
 
@@ -140,19 +181,19 @@ func NewPodMissingProxy(r *resource.Instance) diag.Message {
 func NewGatewayPortNotOnWorkload(r *resource.Instance, selector string, port int) diag.Message {
 	return diag.NewMessage(
 		GatewayPortNotOnWorkload,
-		originOrNil(r),
+		r,
 		selector,
 		port,
 	)
 }
 
-// NewIstioProxyVersionMismatch returns a new diag.Message based on IstioProxyVersionMismatch.
-func NewIstioProxyVersionMismatch(r *resource.Instance, proxyVersion string, injectionVersion string) diag.Message {
+// NewIstioProxyImageMismatch returns a new diag.Message based on IstioProxyImageMismatch.
+func NewIstioProxyImageMismatch(r *resource.Instance, proxyImage string, injectionImage string) diag.Message {
 	return diag.NewMessage(
-		IstioProxyVersionMismatch,
-		originOrNil(r),
-		proxyVersion,
-		injectionVersion,
+		IstioProxyImageMismatch,
+		r,
+		proxyImage,
+		injectionImage,
 	)
 }
 
@@ -160,7 +201,7 @@ func NewIstioProxyVersionMismatch(r *resource.Instance, proxyVersion string, inj
 func NewSchemaValidationError(r *resource.Instance, err error) diag.Message {
 	return diag.NewMessage(
 		SchemaValidationError,
-		originOrNil(r),
+		r,
 		err,
 	)
 }
@@ -169,7 +210,7 @@ func NewSchemaValidationError(r *resource.Instance, err error) diag.Message {
 func NewMisplacedAnnotation(r *resource.Instance, annotation string, kind string) diag.Message {
 	return diag.NewMessage(
 		MisplacedAnnotation,
-		originOrNil(r),
+		r,
 		annotation,
 		kind,
 	)
@@ -179,7 +220,7 @@ func NewMisplacedAnnotation(r *resource.Instance, annotation string, kind string
 func NewUnknownAnnotation(r *resource.Instance, annotation string) diag.Message {
 	return diag.NewMessage(
 		UnknownAnnotation,
-		originOrNil(r),
+		r,
 		annotation,
 	)
 }
@@ -188,7 +229,7 @@ func NewUnknownAnnotation(r *resource.Instance, annotation string) diag.Message 
 func NewConflictingMeshGatewayVirtualServiceHosts(r *resource.Instance, virtualServices string, host string) diag.Message {
 	return diag.NewMessage(
 		ConflictingMeshGatewayVirtualServiceHosts,
-		originOrNil(r),
+		r,
 		virtualServices,
 		host,
 	)
@@ -198,7 +239,7 @@ func NewConflictingMeshGatewayVirtualServiceHosts(r *resource.Instance, virtualS
 func NewConflictingSidecarWorkloadSelectors(r *resource.Instance, conflictingSidecars []string, namespace string, workloadPod string) diag.Message {
 	return diag.NewMessage(
 		ConflictingSidecarWorkloadSelectors,
-		originOrNil(r),
+		r,
 		conflictingSidecars,
 		namespace,
 		workloadPod,
@@ -209,7 +250,7 @@ func NewConflictingSidecarWorkloadSelectors(r *resource.Instance, conflictingSid
 func NewMultipleSidecarsWithoutWorkloadSelectors(r *resource.Instance, conflictingSidecars []string, namespace string) diag.Message {
 	return diag.NewMessage(
 		MultipleSidecarsWithoutWorkloadSelectors,
-		originOrNil(r),
+		r,
 		conflictingSidecars,
 		namespace,
 	)
@@ -219,7 +260,7 @@ func NewMultipleSidecarsWithoutWorkloadSelectors(r *resource.Instance, conflicti
 func NewVirtualServiceDestinationPortSelectorRequired(r *resource.Instance, destHost string, destPorts []int) diag.Message {
 	return diag.NewMessage(
 		VirtualServiceDestinationPortSelectorRequired,
-		originOrNil(r),
+		r,
 		destHost,
 		destPorts,
 	)
@@ -229,7 +270,7 @@ func NewVirtualServiceDestinationPortSelectorRequired(r *resource.Instance, dest
 func NewMTLSPolicyConflict(r *resource.Instance, host string, destinationRuleName string, destinationRuleMTLSMode bool, policyName string, policyMTLSMode string) diag.Message {
 	return diag.NewMessage(
 		MTLSPolicyConflict,
-		originOrNil(r),
+		r,
 		host,
 		destinationRuleName,
 		destinationRuleMTLSMode,
@@ -242,7 +283,7 @@ func NewMTLSPolicyConflict(r *resource.Instance, host string, destinationRuleNam
 func NewPolicySpecifiesPortNameThatDoesntExist(r *resource.Instance, portName string, host string) diag.Message {
 	return diag.NewMessage(
 		PolicySpecifiesPortNameThatDoesntExist,
-		originOrNil(r),
+		r,
 		portName,
 		host,
 	)
@@ -252,7 +293,7 @@ func NewPolicySpecifiesPortNameThatDoesntExist(r *resource.Instance, portName st
 func NewDestinationRuleUsesMTLSForWorkloadWithoutSidecar(r *resource.Instance, destinationRuleName string, host string) diag.Message {
 	return diag.NewMessage(
 		DestinationRuleUsesMTLSForWorkloadWithoutSidecar,
-		originOrNil(r),
+		r,
 		destinationRuleName,
 		host,
 	)
@@ -262,7 +303,7 @@ func NewDestinationRuleUsesMTLSForWorkloadWithoutSidecar(r *resource.Instance, d
 func NewDeploymentAssociatedToMultipleServices(r *resource.Instance, deployment string, port int32, services []string) diag.Message {
 	return diag.NewMessage(
 		DeploymentAssociatedToMultipleServices,
-		originOrNil(r),
+		r,
 		deployment,
 		port,
 		services,
@@ -270,11 +311,10 @@ func NewDeploymentAssociatedToMultipleServices(r *resource.Instance, deployment 
 }
 
 // NewDeploymentRequiresServiceAssociated returns a new diag.Message based on DeploymentRequiresServiceAssociated.
-func NewDeploymentRequiresServiceAssociated(r *resource.Instance, deployment string) diag.Message {
+func NewDeploymentRequiresServiceAssociated(r *resource.Instance) diag.Message {
 	return diag.NewMessage(
 		DeploymentRequiresServiceAssociated,
-		originOrNil(r),
-		deployment,
+		r,
 	)
 }
 
@@ -282,17 +322,37 @@ func NewDeploymentRequiresServiceAssociated(r *resource.Instance, deployment str
 func NewPortNameIsNotUnderNamingConvention(r *resource.Instance, portName string, port int, targetPort string) diag.Message {
 	return diag.NewMessage(
 		PortNameIsNotUnderNamingConvention,
-		originOrNil(r),
+		r,
 		portName,
 		port,
 		targetPort,
 	)
 }
 
-func originOrNil(r *resource.Instance) resource.Origin {
-	var o resource.Origin
-	if r != nil {
-		o = r.Origin
-	}
-	return o
+// NewJwtFailureDueToInvalidServicePortPrefix returns a new diag.Message based on JwtFailureDueToInvalidServicePortPrefix.
+func NewJwtFailureDueToInvalidServicePortPrefix(r *resource.Instance, port int, portName string, protocol string, targetPort string) diag.Message {
+	return diag.NewMessage(
+		JwtFailureDueToInvalidServicePortPrefix,
+		r,
+		port,
+		portName,
+		protocol,
+		targetPort,
+	)
+}
+
+// NewPolicyResourceIsDeprecated returns a new diag.Message based on PolicyResourceIsDeprecated.
+func NewPolicyResourceIsDeprecated(r *resource.Instance) diag.Message {
+	return diag.NewMessage(
+		PolicyResourceIsDeprecated,
+		r,
+	)
+}
+
+// NewMeshPolicyResourceIsDeprecated returns a new diag.Message based on MeshPolicyResourceIsDeprecated.
+func NewMeshPolicyResourceIsDeprecated(r *resource.Instance) diag.Message {
+	return diag.NewMessage(
+		MeshPolicyResourceIsDeprecated,
+		r,
+	)
 }

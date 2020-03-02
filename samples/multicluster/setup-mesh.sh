@@ -41,7 +41,7 @@ fi
 # Resolve to an absolute path
 WORKDIR=$(cd "$(dirname "${WORKDIR}")" && pwd)/$(basename "${WORKDIR}")
 
-# Per-cluster IstioControlPlane are derived from this common base IstioControlPlane.
+# Per-cluster IstioOperator are derived from this common base IstioOperator.
 BASE_FILENAME="${WORKDIR}/base.yaml"
 
 # Description of the mesh topology. Includes the list of clusters in the mesh.
@@ -116,9 +116,13 @@ create_offline_root_ca(){
 }
 
 create_base() {
+  if [ -f "${BASE_FILENAME}" ]; then
+    echo "${BASE_FILENAME} already exists."
+    return
+  fi
   cat << EOF > "${BASE_FILENAME}"
-apiVersion: install.istio.io/v1alpha2
-kind: IstioControlPlane
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
 spec:
   values:
     security:
@@ -181,9 +185,12 @@ wait_for_gateway() {
   kc() { kubectl --context "${CONTEXT}" "$@"; }
 
   while true; do
-    if IP=$(kc -n istio-system get svc istio-ingressgateway -o "jsonpath"='{.status.loadBalancer.ingress[0].ip}'); then
+    IP=$(kc -n istio-system get svc istio-ingressgateway -o "jsonpath"='{.status.loadBalancer.ingress[0].ip}')
+    if [ "$IP" != '' ]; then
       echo "Ingress gateway external IP for cluster ${CONTEXT} is ready: ${IP}"
       return 0
+    else
+      echo "Wait for ingress gateway external IP for cluster ${CONTEXT} is ready."
     fi
     sleep 1
   done
@@ -289,7 +296,7 @@ usage() {
 
 prep-mesh
   Prepare the workspace and files to build mesh. This includes the root key and
-  cert, base IstioControlPlane configuration, and initial empty mesh topology
+  cert, base IstioOperator configuration, and initial empty mesh topology
   file.
 
 apply

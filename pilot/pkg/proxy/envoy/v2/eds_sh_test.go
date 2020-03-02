@@ -68,7 +68,7 @@ func TestSplitHorizonEds(t *testing.T) {
 	initRegistry(server, 4, []string{}, 4)
 
 	// Push contexts needs to be updated
-	server.EnvoyXdsServer.ClearCache()
+	server.EnvoyXdsServer.ConfigUpdate(&model.PushRequest{Full: true})
 	time.Sleep(time.Millisecond * 200) // give time for cache to clear
 
 	tests := []struct {
@@ -244,7 +244,7 @@ func initRegistry(server *bootstrap.Server, clusterNum int, gatewaysIP []string,
 		map[host.Name]*model.Service{}, 2)
 	server.ServiceController().AddRegistry(serviceregistry.Simple{
 		ClusterID:        id,
-		ProviderID:       "memAdapter",
+		ProviderID:       serviceregistry.Mock,
 		ServiceDiscovery: memRegistry,
 		Controller:       &v2.MemServiceController{},
 	})

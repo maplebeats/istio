@@ -22,8 +22,8 @@ import (
 	"gopkg.in/square/go-jose.v2/json"
 	"sigs.k8s.io/yaml"
 
-	"istio.io/istio/galley/pkg/config/meta/metadata"
 	"istio.io/istio/galley/testdatasets/validation"
+	"istio.io/istio/pkg/config/schema"
 	"istio.io/istio/pkg/test/util/yml"
 
 	"istio.io/istio/pkg/test/framework"
@@ -146,9 +146,10 @@ var ignoredCRDs = []string{
 	"/v1/Pod",
 	"/v1/Secret",
 	"/v1/Service",
+	"/v1/ConfigMap",
+	"apiextensions.k8s.io/v1beta1/CustomResourceDefinition",
 	"apps/v1/Deployment",
 	"extensions/v1beta1/Ingress",
-	"networking.istio.io/v1alpha3/SyntheticServiceEntry",
 }
 
 func TestEnsureNoMissingCRDs(t *testing.T) {
@@ -165,9 +166,28 @@ func TestEnsureNoMissingCRDs(t *testing.T) {
 
 			recognized := make(map[string]struct{})
 
-			for _, r := range metadata.MustGet().KubeSource().Resources() {
-				s := strings.Join([]string{r.Group, r.Version, r.Kind}, "/")
+			// TODO(jasonwzm) remove this after multi-version APIs are supported.
+			for _, r := range schema.MustGet().KubeCollections().All() {
+				s := strings.Join([]string{r.Resource().Group(), r.Resource().Version(), r.Resource().Kind()}, "/")
 				recognized[s] = struct{}{}
+			}
+			for _, gvk := range []string{
+				"networking.istio.io/v1beta1/Gateway",
+				"networking.istio.io/v1beta1/DestinationRule",
+				"networking.istio.io/v1beta1/VirtualService",
+				"networking.istio.io/v1beta1/Sidecar",
+			} {
+				recognized[gvk] = struct{}{}
+			}
+			// These CRDs are validated outside of Istio
+			for _, gvk := range []string{
+				"networking.x.k8s.io/v1alpha1/Gateway",
+				"networking.x.k8s.io/v1alpha1/GatewayClass",
+				"networking.x.k8s.io/v1alpha1/HTTPRoute",
+				"networking.x.k8s.io/v1alpha1/TcpRoute",
+				"networking.x.k8s.io/v1alpha1/TrafficSplit",
+			} {
+				delete(recognized, gvk)
 			}
 
 			testedValid := make(map[string]struct{})

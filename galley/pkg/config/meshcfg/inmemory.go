@@ -20,8 +20,10 @@ import (
 	"github.com/gogo/protobuf/proto"
 
 	"istio.io/api/mesh/v1alpha1"
-	"istio.io/istio/galley/pkg/config/event"
-	"istio.io/istio/galley/pkg/config/resource"
+
+	"istio.io/istio/pkg/config/event"
+	"istio.io/istio/pkg/config/resource"
+	"istio.io/istio/pkg/config/schema/collections"
 )
 
 // InMemorySource is an event.InMemorySource implementation for meshconfig. When the mesh config is first set, add & fullsync events
@@ -107,7 +109,7 @@ func (s *InMemorySource) send(k event.Kind) {
 	// must be called under lock
 	e := event.Event{
 		Kind:   k,
-		Source: IstioMeshconfig,
+		Source: collections.IstioMeshV1Alpha1MeshConfig,
 	}
 
 	switch k {
@@ -115,6 +117,7 @@ func (s *InMemorySource) send(k event.Kind) {
 		e.Resource = &resource.Instance{
 			Metadata: resource.Metadata{
 				FullName: ResourceName,
+				Schema:   collections.IstioMeshV1Alpha1MeshConfig.Resource(),
 			},
 			Message: proto.Clone(s.current),
 		}

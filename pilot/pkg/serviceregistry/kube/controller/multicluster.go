@@ -25,7 +25,8 @@ import (
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/serviceregistry/aggregate"
 	"istio.io/istio/pkg/config/mesh"
-	"istio.io/istio/pkg/config/schemas"
+	"istio.io/istio/pkg/config/schema/collections"
+	"istio.io/istio/pkg/config/schema/resource"
 	"istio.io/istio/pkg/kube/secretcontroller"
 )
 
@@ -131,7 +132,8 @@ func (m *Multicluster) updateHandler() {
 	if m.XDSUpdater != nil {
 		req := &model.PushRequest{
 			Full:               true,
-			ConfigTypesUpdated: map[string]struct{}{schemas.ServiceEntry.Type: {}},
+			ConfigTypesUpdated: map[resource.GroupVersionKind]struct{}{collections.IstioNetworkingV1Alpha3Serviceentries.Resource().GroupVersionKind(): {}},
+			Reason:             []model.TriggerReason{model.UnknownTrigger},
 		}
 		m.XDSUpdater.ConfigUpdate(req)
 	}

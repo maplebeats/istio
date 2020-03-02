@@ -146,6 +146,12 @@ const (
 
 	// IstioMutualTLSModeLabel implies that the endpoint is ready to receive Istio mTLS connections.
 	IstioMutualTLSModeLabel = "istio"
+
+	// IstioCanonicalServiceLabelName is the name of label for the Istio Canonical Service for a workload instance.
+	IstioCanonicalServiceLabelName = "service.istio.io/canonical-name"
+
+	// IstioCanonicalServiceRevisionLabelName is the name of label for the Istio Canonical Service revision for a workload instance.
+	IstioCanonicalServiceRevisionLabelName = "service.istio.io/canonical-revision"
 )
 
 // Port represents a network port where a service is listening for
@@ -167,29 +173,6 @@ type Port struct {
 
 // PortList is a set of ports
 type PortList []*Port
-
-// AddressFamily indicates the kind of transport used to reach an IstioEndpoint
-type AddressFamily int
-
-const (
-	// AddressFamilyTCP represents an address that connects to a TCP endpoint. It consists of an IP address or host and
-	// a port number.
-	AddressFamilyTCP AddressFamily = iota
-	// AddressFamilyUnix represents an address that connects to a Unix Domain Socket. It consists of a socket file path.
-	AddressFamilyUnix
-)
-
-// String converts addressfamily into string (tcp/unix)
-func (f AddressFamily) String() string {
-	switch f {
-	case AddressFamilyTCP:
-		return "tcp"
-	case AddressFamilyUnix:
-		return "unix"
-	default:
-		return fmt.Sprintf("%d", f)
-	}
-}
 
 // TrafficDirection defines whether traffic exists a service instance or enters a service instance
 type TrafficDirection string
@@ -249,6 +232,19 @@ func (instance *ServiceInstance) GetLocality() string {
 	return GetLocalityOrDefault(instance.Endpoint.Labels[LocalityLabel], instance.Endpoint.Locality)
 }
 
+// DeepCopy creates a copy of ServiceInstance.
+func (instance *ServiceInstance) DeepCopy() *ServiceInstance {
+	return &ServiceInstance{
+		Service:  instance.Service.DeepCopy(),
+		Endpoint: instance.Endpoint.DeepCopy(),
+		ServicePort: &Port{
+			Name:     instance.ServicePort.Name,
+			Port:     instance.ServicePort.Port,
+			Protocol: instance.ServicePort.Protocol,
+		},
+	}
+}
+
 // GetLocalityOrDefault returns the locality from the supplied label, or falls back to
 // the supplied default locality if the supplied label is empty. Because Kubernetes
 // labels don't support `/`, we replace "." with "/" in the supplied label as a workaround.
@@ -286,10 +282,6 @@ func GetLocalityOrDefault(label, defaultLocality string) string {
 type IstioEndpoint struct {
 	// Labels points to the workload or deployment labels.
 	Labels labels.Instance
-
-	// Family indicates what type of endpoint, such as TCP or Unix Domain Socket.
-	// Default is TCP.
-	Family AddressFamily
 
 	// Address is the address of the endpoint, using envoy proto.
 	Address string
@@ -573,7 +565,7 @@ func ParseServiceKey(s string) (hostname host.Name, ports PortList, lc labels.Co
 // BuildSubsetKey generates a unique string referencing service instances for a given service name, a subset and a port.
 // The proxy queries Pilot with this key to obtain the list of instances in a subset.
 func BuildSubsetKey(direction TrafficDirection, subsetName string, hostname host.Name, port int) string {
-	return fmt.Sprintf("%s|%d|%s|%s", direction, port, subsetName, hostname)
+	return string(direction) + "|" + strconv.Itoa(port) + "|" + subsetName + "|" + string(hostname)
 }
 
 // BuildDNSSrvSubsetKey generates a unique string referencing service instances for a given service name, a subset and a port.
@@ -581,7 +573,7 @@ func BuildSubsetKey(direction TrafficDirection, subsetName string, hostname host
 // This is used only for the SNI-DNAT router. Do not use for other purposes.
 // The DNS Srv format of the cluster is also used as the default SNI string for Istio mTLS connections
 func BuildDNSSrvSubsetKey(direction TrafficDirection, subsetName string, hostname host.Name, port int) string {
-	return fmt.Sprintf("%s_.%d_.%s_.%s", direction, port, subsetName, hostname)
+	return string(direction) + "_." + strconv.Itoa(port) + "_." + subsetName + "_." + string(hostname)
 }
 
 // IsValidSubsetKey checks if a string is valid for subset key parsing.
@@ -663,6 +655,11 @@ func (s *Service) DeepCopy() *Service {
 		Resolution:      s.Resolution,
 		MeshExternal:    s.MeshExternal,
 	}
+}
+
+// DeepCopy creates a clone of IstioEndpoint.
+func (ep *IstioEndpoint) DeepCopy() *IstioEndpoint {
+	return copyInternal(ep).(*IstioEndpoint)
 }
 
 func copyInternal(v interface{}) interface{} {

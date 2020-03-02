@@ -20,36 +20,14 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	admin "github.com/envoyproxy/go-control-plane/envoy/admin/v2alpha"
-	envoyapicore "github.com/envoyproxy/go-control-plane/envoy/api/v2/core"
-	"github.com/gogo/protobuf/jsonpb"
 	. "github.com/onsi/gomega"
-
-	"istio.io/istio/pilot/pkg/model"
-	networking "istio.io/istio/pilot/pkg/networking/core/v1alpha3"
 )
 
 var (
-	liveServerStats = "cluster_manager.cds.update_success: 1\nlistener_manager.lds.update_success: 1\nserver.state: 0"
+	liveServerStats = "cluster_manager.cds.update_success: 1\nlistener_manager.lds.update_success: 1\nserver.state: 0\nlistener_manager.workers_started: 1"
 	onlyServerStats = "server.state: 0"
 	initServerStats = "cluster_manager.cds.update_success: 1\nlistener_manager.lds.update_success: 1\nserver.state: 2"
 	noServerStats   = ""
-	listeners       = admin.Listeners{
-		ListenerStatuses: []*admin.ListenerStatus{
-			{
-				Name: networking.VirtualInboundListenerName,
-				LocalAddress: &envoyapicore.Address{
-					Address: &envoyapicore.Address_SocketAddress{
-						SocketAddress: &envoyapicore.SocketAddress{
-							PortSpecifier: &envoyapicore.SocketAddress_PortValue{
-								PortValue: 15006,
-							},
-						},
-					},
-				},
-			},
-		},
-	}
 )
 
 func TestEnvoyStatsCompleteAndSuccessful(t *testing.T) {
@@ -57,7 +35,7 @@ func TestEnvoyStatsCompleteAndSuccessful(t *testing.T) {
 
 	server := createAndStartServer(liveServerStats)
 	defer server.Close()
-	probe := Probe{LocalHostAddr: "localhost", AdminPort: 1234}
+	probe := Probe{AdminPort: 1234}
 
 	err := probe.Check()
 
@@ -88,10 +66,20 @@ listener_manager.lds.update_success: 1`,
 			prefix + "cds updates: 0 successful, 1 rejected; lds updates: 1 successful, 0 rejected",
 		},
 		{
+			"workers not started",
+			`
+cluster_manager.cds.update_success: 1
+listener_manager.lds.update_success: 1
+listener_manager.workers_started: 0
+server.state: 0`,
+			"workers have not yet started",
+		},
+		{
 			"full",
 			`
 cluster_manager.cds.update_success: 1
 listener_manager.lds.update_success: 1
+listener_manager.workers_started: 1
 server.state: 0`,
 			"",
 		},
@@ -101,7 +89,7 @@ server.state: 0`,
 		t.Run(tt.name, func(t *testing.T) {
 			server := createAndStartServer(tt.stats)
 			defer server.Close()
-			probe := Probe{LocalHostAddr: "localhost", AdminPort: 1234}
+			probe := Probe{AdminPort: 1234}
 
 			err := probe.Check()
 
@@ -125,7 +113,7 @@ func TestEnvoyInitializing(t *testing.T) {
 
 	server := createAndStartServer(initServerStats)
 	defer server.Close()
-	probe := Probe{LocalHostAddr: "localhost", AdminPort: 1234}
+	probe := Probe{AdminPort: 1234}
 
 	err := probe.Check()
 
@@ -137,7 +125,7 @@ func TestEnvoyNoClusterManagerStats(t *testing.T) {
 
 	server := createAndStartServer(onlyServerStats)
 	defer server.Close()
-	probe := Probe{LocalHostAddr: "localhost", AdminPort: 1234}
+	probe := Probe{AdminPort: 1234}
 
 	err := probe.Check()
 
@@ -149,33 +137,11 @@ func TestEnvoyNoServerStats(t *testing.T) {
 
 	server := createAndStartServer(noServerStats)
 	defer server.Close()
-	probe := Probe{LocalHostAddr: "localhost", AdminPort: 1234}
+	probe := Probe{AdminPort: 1234}
 
 	err := probe.Check()
 
 	g.Expect(err).To(HaveOccurred())
-}
-
-func TestEnvoyInitializingWithVirtualInboundListener(t *testing.T) {
-	g := NewGomegaWithT(t)
-
-	funcMap := createDefaultFuncMap(liveServerStats)
-
-	funcMap["/listeners"] = func(rw http.ResponseWriter, _ *http.Request) {
-		jsonm := &jsonpb.Marshaler{Indent: "  "}
-		listenerBytes, _ := jsonm.MarshalToString(&listeners)
-
-		// Send response to be tested
-		rw.Write([]byte(listenerBytes))
-	}
-
-	server := createHTTPServer(funcMap)
-	defer server.Close()
-	probe := Probe{LocalHostAddr: "localhost", AdminPort: 1234, receivedFirstUpdate: true, NodeType: model.SidecarProxy}
-
-	err := probe.Check()
-
-	g.Expect(err).ToNot(HaveOccurred())
 }
 
 func createDefaultFuncMap(statsToReturn string) map[string]func(rw http.ResponseWriter, _ *http.Request) {

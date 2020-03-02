@@ -27,9 +27,9 @@ import (
 	"istio.io/istio/istioctl/pkg/install"
 	"istio.io/istio/istioctl/pkg/multicluster"
 	"istio.io/istio/istioctl/pkg/validate"
+	"istio.io/istio/operator/cmd/mesh"
 	"istio.io/istio/pilot/pkg/serviceregistry/kube/controller"
 	"istio.io/istio/pkg/cmd"
-	"istio.io/operator/cmd/mesh"
 	"istio.io/pkg/collateral"
 	"istio.io/pkg/log"
 )
@@ -49,12 +49,6 @@ var (
 	istioNamespace   string
 	defaultNamespace string
 
-	// input file name
-	file string
-
-	// output format (yaml or short)
-	outputFormat string
-
 	// Create a kubernetes.ExecClient (or mockExecClient)
 	clientExecFactory = newExecClient
 
@@ -72,6 +66,8 @@ func defaultLogOptions() *log.Options {
 	o.SetOutputLevel("processing", log.ErrorLevel)
 	o.SetOutputLevel("source", log.ErrorLevel)
 	o.SetOutputLevel("analysis", log.WarnLevel)
+	o.SetOutputLevel("installer", log.WarnLevel)
+	o.SetOutputLevel("translator", log.WarnLevel)
 
 	return o
 }
@@ -157,12 +153,15 @@ debug and diagnose their Istio mesh.
 	manifestCmd := mesh.ManifestCmd()
 	hideInheritedFlags(manifestCmd, "namespace", "istioNamespace")
 	rootCmd.AddCommand(manifestCmd)
+	operatorCmd := mesh.OperatorCmd()
+	rootCmd.AddCommand(operatorCmd)
 
 	profileCmd := mesh.ProfileCmd()
 	hideInheritedFlags(profileCmd, "namespace", "istioNamespace")
 	rootCmd.AddCommand(profileCmd)
 
-	experimentalCmd.AddCommand(mesh.UpgradeCmd())
+	experimentalCmd.AddCommand(softGraduatedCmd(mesh.UpgradeCmd()))
+	rootCmd.AddCommand(mesh.UpgradeCmd())
 
 	experimentalCmd.AddCommand(multicluster.NewCreateRemoteSecretCommand())
 	experimentalCmd.AddCommand(multicluster.NewMulticlusterCommand())
@@ -172,13 +171,6 @@ debug and diagnose their Istio mesh.
 		Section: "istioctl CLI",
 		Manual:  "Istio Control",
 	}))
-
-	// Deprecated commands
-	rootCmd.AddCommand(postCmd)
-	rootCmd.AddCommand(putCmd)
-	rootCmd.AddCommand(getCmd)
-	rootCmd.AddCommand(deleteCmd)
-	rootCmd.AddCommand(contextCmd)
 
 	rootCmd.AddCommand(validate.NewValidateCommand(&istioNamespace))
 

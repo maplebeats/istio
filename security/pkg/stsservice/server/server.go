@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httputil"
 
@@ -27,19 +28,19 @@ import (
 )
 
 const (
-	// tokenPath is url path for handling STS requests.
-	tokenPath = "/token"
-	// stsStatusPath is the path for dumping STS status.
-	stsStatusPath = "/stsStatus"
-	// urlEncodedForm is the encoding type specified in a STS request.
-	urlEncodedForm = "application/x-www-form-urlencoded"
-	// tokenExchangeGrantType is the required value for "grant_type" parameter in a STS request.
-	tokenExchangeGrantType = "urn:ietf:params:oauth:grant-type:token-exchange"
-	// subjectTokenType is the required token type in a STS request.
-	subjectTokenType = "urn:ietf:params:oauth:token-type:jwt"
+	// TokenPath is url path for handling STS requests.
+	TokenPath = "/token"
+	// StsStatusPath is the path for dumping STS status.
+	StsStatusPath = "/stsStatus"
+	// URLEncodedForm is the encoding type specified in a STS request.
+	URLEncodedForm = "application/x-www-form-urlencoded"
+	// TokenExchangeGrantType is the required value for "grant_type" parameter in a STS request.
+	TokenExchangeGrantType = "urn:ietf:params:oauth:grant-type:token-exchange"
+	// SubjectTokenType is the required token type in a STS request.
+	SubjectTokenType = "urn:ietf:params:oauth:token-type:jwt"
 )
 
-var stsServerLog = log.RegisterScope("stsServerLog", "STS service debugging", 0)
+var stsServerLog = log.RegisterScope("stsserver", "STS service debugging", 0)
 
 // error code sent in a STS error response. A full list of error code is
 // defined in https://tools.ietf.org/html/rfc6749#section-5.2.
@@ -60,6 +61,8 @@ type Server struct {
 	// generated token to the STS server.
 	tokenManager stsservice.TokenManager
 	stsServer    *http.Server
+	// Port number that server listens on.
+	Port int
 }
 
 // Config for the STS server.
@@ -74,15 +77,22 @@ func NewServer(config Config, tokenManager stsservice.TokenManager) (*Server, er
 		tokenManager: tokenManager,
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc(tokenPath, s.ServeStsRequests)
-	mux.HandleFunc(stsStatusPath, s.DumpStsStatus)
+	mux.HandleFunc(TokenPath, s.ServeStsRequests)
+	mux.HandleFunc(StsStatusPath, s.DumpStsStatus)
 	s.stsServer = &http.Server{
 		Addr:    fmt.Sprintf("%s:%d", config.LocalHostAddr, config.LocalPort),
 		Handler: mux,
 	}
+	ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", config.LocalHostAddr, config.LocalPort))
+	if err != nil {
+		log.Errorf("Server failed to listen %v", err)
+		return nil, err
+	}
+	// If passed in port is 0, get the actual chosen port.
+	s.Port = ln.Addr().(*net.TCPAddr).Port
 	go func() {
-		stsServerLog.Infof("Start listening on %s:%d", config.LocalHostAddr, config.LocalPort)
-		err := s.stsServer.ListenAndServe()
+		stsServerLog.Infof("Start listening on %s:%d", config.LocalHostAddr, s.Port)
+		err := s.stsServer.Serve(ln)
 		// ListenAndServe always returns a non-nil error.
 		stsServerLog.Errora(err)
 	}()
@@ -123,24 +133,24 @@ func (s *Server) validateStsRequest(req *http.Request) (stsservice.StsRequestPar
 	if req.Method != "POST" {
 		return reqParam, fmt.Errorf("request method is invalid, should be POST but get %s", req.Method)
 	}
-	if req.Header.Get("Content-Type") != urlEncodedForm {
-		return reqParam, fmt.Errorf("request content type is invalid, should be %s but get %s", urlEncodedForm,
+	if req.Header.Get("Content-Type") != URLEncodedForm {
+		return reqParam, fmt.Errorf("request content type is invalid, should be %s but get %s", URLEncodedForm,
 			req.Header.Get("Content-type"))
 	}
 	if parseErr := req.ParseForm(); parseErr != nil {
 		return reqParam, fmt.Errorf("failed to parse query from STS request: %v", parseErr)
 	}
-	if req.PostForm.Get("grant_type") != tokenExchangeGrantType {
+	if req.PostForm.Get("grant_type") != TokenExchangeGrantType {
 		return reqParam, fmt.Errorf("request query grant_type is invalid, should be %s but get %s",
-			tokenExchangeGrantType, req.PostForm.Get("grant_type"))
+			TokenExchangeGrantType, req.PostForm.Get("grant_type"))
 	}
 	// Only a JWT token is accepted.
 	if req.PostForm.Get("subject_token") == "" {
 		return reqParam, errors.New("subject_token is empty")
 	}
-	if req.PostForm.Get("subject_token_type") != subjectTokenType {
+	if req.PostForm.Get("subject_token_type") != SubjectTokenType {
 		return reqParam, fmt.Errorf("subject_token_type is invalid, should be %s but get %s",
-			subjectTokenType, req.PostForm.Get("subject_token_type"))
+			SubjectTokenType, req.PostForm.Get("subject_token_type"))
 	}
 	reqParam.GrantType = req.PostForm.Get("grant_type")
 	reqParam.Resource = req.PostForm.Get("resource")
@@ -184,7 +194,7 @@ func (s *Server) sendSuccessfulResponse(w http.ResponseWriter, tokenData []byte)
 	if _, err := w.Write(tokenData); err != nil {
 		stsServerLog.Errorf("failure in sending STS success response: %v", err)
 	}
-	stsServerLog.Debugf("sent out STS success response: %v", tokenData)
+	stsServerLog.Debug("sent out STS success response")
 }
 
 // DumpStsStatus handles requests for dumping STS status, including STS requests being served,

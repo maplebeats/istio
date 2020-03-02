@@ -83,7 +83,7 @@ func convertServices(cfg model.Config) []*model.Service {
 						Ports:        svcPorts,
 						Resolution:   resolution,
 						Attributes: model.ServiceAttributes{
-							ServiceRegistry: string(serviceregistry.MCP),
+							ServiceRegistry: string(serviceregistry.External),
 							Name:            hostname,
 							Namespace:       cfg.Namespace,
 							ExportTo:        exportTo,
@@ -98,7 +98,7 @@ func convertServices(cfg model.Config) []*model.Service {
 						Ports:        svcPorts,
 						Resolution:   resolution,
 						Attributes: model.ServiceAttributes{
-							ServiceRegistry: string(serviceregistry.MCP),
+							ServiceRegistry: string(serviceregistry.External),
 							Name:            hostname,
 							Namespace:       cfg.Namespace,
 							ExportTo:        exportTo,
@@ -115,7 +115,7 @@ func convertServices(cfg model.Config) []*model.Service {
 				Ports:        svcPorts,
 				Resolution:   resolution,
 				Attributes: model.ServiceAttributes{
-					ServiceRegistry: string(serviceregistry.MCP),
+					ServiceRegistry: string(serviceregistry.External),
 					Name:            hostname,
 					Namespace:       cfg.Namespace,
 					ExportTo:        exportTo,
@@ -130,18 +130,15 @@ func convertServices(cfg model.Config) []*model.Service {
 func convertEndpoint(service *model.Service, servicePort *networking.Port,
 	endpoint *networking.ServiceEntry_Endpoint) *model.ServiceInstance {
 	var instancePort uint32
-	var family model.AddressFamily
 	addr := endpoint.GetAddress()
 	if strings.HasPrefix(addr, model.UnixAddressPrefix) {
 		instancePort = 0
-		family = model.AddressFamilyUnix
 		addr = strings.TrimPrefix(addr, model.UnixAddressPrefix)
 	} else {
 		instancePort = endpoint.Ports[servicePort.Name]
 		if instancePort == 0 {
 			instancePort = servicePort.Number
 		}
-		family = model.AddressFamilyTCP
 	}
 
 	tlsMode := model.GetTLSModeFromEndpointLabels(endpoint.Labels)
@@ -149,7 +146,6 @@ func convertEndpoint(service *model.Service, servicePort *networking.Port,
 	return &model.ServiceInstance{
 		Endpoint: &model.IstioEndpoint{
 			Address:         addr,
-			Family:          family,
 			EndpointPort:    instancePort,
 			ServicePortName: servicePort.Name,
 			Network:         endpoint.Network,

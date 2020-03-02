@@ -21,11 +21,12 @@ import (
 
 	xdsapi "github.com/envoyproxy/go-control-plane/envoy/api/v2"
 	route "github.com/envoyproxy/go-control-plane/envoy/api/v2/route"
+	"github.com/golang/protobuf/ptypes"
 
 	networking "istio.io/api/networking/v1alpha3"
 
-	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model"
+	istionetworking "istio.io/istio/pilot/pkg/networking"
 	"istio.io/istio/pilot/pkg/networking/core/v1alpha3/envoyfilter"
 	istio_route "istio.io/istio/pilot/pkg/networking/core/v1alpha3/route"
 	"istio.io/istio/pilot/pkg/networking/plugin"
@@ -98,8 +99,7 @@ func (configgen *ConfigGeneratorImpl) buildSidecarInboundHTTPRouteConfig(
 	}
 
 	in := &plugin.InputParams{
-		ListenerProtocol: plugin.ListenerProtocolHTTP,
-		ListenerCategory: networking.EnvoyFilter_SIDECAR_INBOUND,
+		ListenerProtocol: istionetworking.ListenerProtocolHTTP,
 		Node:             node,
 		ServiceInstance:  instance,
 		Service:          instance.Service,
@@ -179,43 +179,8 @@ func (configgen *ConfigGeneratorImpl) buildSidecarOutboundHTTPRouteConfig(node *
 
 	util.SortVirtualHosts(virtualHosts)
 
-	if features.EnableFallthroughRoute.Get() && !useSniffing {
-		// This needs to be the last virtual host, as routes are evaluated in order.
-		if util.IsAllowAnyOutbound(node) {
-			virtualHosts = append(virtualHosts, &route.VirtualHost{
-				Name:    util.PassthroughRouteName,
-				Domains: []string{"*"},
-				Routes: []*route.Route{
-					{
-						Match: &route.RouteMatch{
-							PathSpecifier: &route.RouteMatch_Prefix{Prefix: "/"},
-						},
-						Action: &route.Route_Route{
-							Route: &route.RouteAction{
-								ClusterSpecifier: &route.RouteAction_Cluster{Cluster: util.PassthroughCluster},
-							},
-						},
-					},
-				},
-			})
-		} else {
-			virtualHosts = append(virtualHosts, &route.VirtualHost{
-				Name:    util.BlackHoleRouteName,
-				Domains: []string{"*"},
-				Routes: []*route.Route{
-					{
-						Match: &route.RouteMatch{
-							PathSpecifier: &route.RouteMatch_Prefix{Prefix: "/"},
-						},
-						Action: &route.Route_DirectResponse{
-							DirectResponse: &route.DirectResponseAction{
-								Status: 502,
-							},
-						},
-					},
-				},
-			})
-		}
+	if !useSniffing {
+		virtualHosts = append(virtualHosts, buildCatchAllVirtualHost(node))
 	}
 
 	out := &xdsapi.RouteConfiguration{
@@ -225,7 +190,7 @@ func (configgen *ConfigGeneratorImpl) buildSidecarOutboundHTTPRouteConfig(node *
 	}
 
 	pluginParams := &plugin.InputParams{
-		ListenerProtocol: plugin.ListenerProtocolHTTP,
+		ListenerProtocol: istionetworking.ListenerProtocolHTTP,
 		ListenerCategory: networking.EnvoyFilter_SIDECAR_OUTBOUND,
 		Node:             node,
 		Push:             push,
@@ -267,10 +232,10 @@ func (configgen *ConfigGeneratorImpl) buildSidecarOutboundVirtualHosts(node *mod
 	// this listener and not all virtual services accessible to this proxy.
 	virtualServices = egressListener.VirtualServices()
 
-	// When generating RDS for ports created via the SidecarScope, we treat
-	// these ports as HTTP proxy style ports. All services attached to this listener
-	// must feature in this RDS route irrespective of the service port.
-	if egressListener.IstioListener != nil && egressListener.IstioListener.Port != nil {
+	// When generating RDS for ports created via the SidecarScope, we treat ports as HTTP proxy style ports
+	// if ports protocol is HTTP_PROXY.
+	if egressListener.IstioListener != nil && egressListener.IstioListener.Port != nil &&
+		protocol.Parse(egressListener.IstioListener.Port.Protocol) == protocol.HTTP_PROXY {
 		listenerPort = 0
 	}
 
@@ -311,9 +276,10 @@ func (configgen *ConfigGeneratorImpl) buildSidecarOutboundVirtualHosts(node *mod
 			if _, found := uniques[name]; !found {
 				uniques[name] = struct{}{}
 				virtualHosts = append(virtualHosts, &route.VirtualHost{
-					Name:    name,
-					Domains: []string{hostname, domainName(hostname, virtualHostWrapper.Port)},
-					Routes:  virtualHostWrapper.Routes,
+					Name:                       name,
+					Domains:                    []string{hostname, domainName(hostname, virtualHostWrapper.Port)},
+					Routes:                     virtualHostWrapper.Routes,
+					IncludeRequestAttemptCount: true,
 				})
 			} else {
 				push.AddMetric(model.DuplicatedDomains, name, node, fmt.Sprintf("duplicate domain from virtual service: %s", name))
@@ -326,9 +292,10 @@ func (configgen *ConfigGeneratorImpl) buildSidecarOutboundVirtualHosts(node *mod
 				uniques[name] = struct{}{}
 				domains := generateVirtualHostDomains(svc, virtualHostWrapper.Port, node)
 				virtualHosts = append(virtualHosts, &route.VirtualHost{
-					Name:    name,
-					Domains: domains,
-					Routes:  virtualHostWrapper.Routes,
+					Name:                       name,
+					Domains:                    domains,
+					Routes:                     virtualHostWrapper.Routes,
+					IncludeRequestAttemptCount: true,
 				})
 			} else {
 				push.AddMetric(model.DuplicatedDomains, name, node, fmt.Sprintf("duplicate domain from virtual service: %s", name))
@@ -507,4 +474,61 @@ func getUniqueAndSharedDNSDomain(fqdnHostname, proxyDomain string) (string, stri
 	uniqHostame := strings.Join(reverseArray(partsFQDN[len(sharedSuffixesInReverse):]), ".")
 	sharedSuffixes := strings.Join(reverseArray(sharedSuffixesInReverse), ".")
 	return uniqHostame, sharedSuffixes
+}
+
+func buildCatchAllVirtualHost(node *model.Proxy) *route.VirtualHost {
+	// This needs to be the last virtual host, as routes are evaluated in order.
+	if util.IsAllowAnyOutbound(node) {
+		egressCluster := util.PassthroughCluster
+		notimeout := ptypes.DurationProto(0)
+
+		// no need to check for nil value as the previous if check has checked
+		if node.SidecarScope.OutboundTrafficPolicy.EgressProxy != nil {
+			// user has provided an explicit destination for all the unknown traffic.
+			// build a cluster out of this destination
+			egressCluster = istio_route.GetDestinationCluster(node.SidecarScope.OutboundTrafficPolicy.EgressProxy,
+				nil, 0)
+		}
+
+		return &route.VirtualHost{
+			Name:    util.PassthroughRouteName,
+			Domains: []string{"*"},
+			Routes: []*route.Route{
+				{
+					Match: &route.RouteMatch{
+						PathSpecifier: &route.RouteMatch_Prefix{Prefix: "/"},
+					},
+					Action: &route.Route_Route{
+						Route: &route.RouteAction{
+							ClusterSpecifier: &route.RouteAction_Cluster{Cluster: egressCluster},
+							// Disable timeout instead of assuming some defaults.
+							Timeout: notimeout,
+							// If not configured at all, the grpc-timeout header is not used and
+							// gRPC requests time out like any other requests using timeout or its default.
+							MaxGrpcTimeout: notimeout,
+						},
+					},
+				},
+			},
+			IncludeRequestAttemptCount: true,
+		}
+	}
+
+	return &route.VirtualHost{
+		Name:    util.BlackHoleRouteName,
+		Domains: []string{"*"},
+		Routes: []*route.Route{
+			{
+				Match: &route.RouteMatch{
+					PathSpecifier: &route.RouteMatch_Prefix{Prefix: "/"},
+				},
+				Action: &route.Route_DirectResponse{
+					DirectResponse: &route.DirectResponseAction{
+						Status: 502,
+					},
+				},
+			},
+		},
+		IncludeRequestAttemptCount: true,
+	}
 }

@@ -60,7 +60,7 @@ const (
 	caKeySize = 2048
 )
 
-var pkiCaLog = log.RegisterScope("pkiCaLog", "Citadel CA log", 0)
+var pkiCaLog = log.RegisterScope("pkica", "Citadel CA log", 0)
 
 // caTypes is the enum for the CA type.
 type caTypes int
@@ -324,4 +324,24 @@ func updateCertInConfigmap(namespace string, client corev1.CoreV1Interface, cert
 	certEncoded := base64.StdEncoding.EncodeToString(cert)
 	cmc := configmap.NewController(namespace, client)
 	return cmc.InsertCATLSRootCert(certEncoded)
+}
+
+// GenKeyCert() generates a certificate signed by the CA and
+// returns the certificate chain and the private key.
+func (ca *IstioCA) GenKeyCert(hostnames []string, certTTL time.Duration) ([]byte, []byte, error) {
+	opts := util.CertOptions{
+		RSAKeySize: 2048,
+	}
+
+	csrPEM, privPEM, err := util.GenCSR(opts)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	certPEM, err := ca.SignWithCertChain(csrPEM, hostnames, certTTL, false)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return certPEM, privPEM, nil
 }

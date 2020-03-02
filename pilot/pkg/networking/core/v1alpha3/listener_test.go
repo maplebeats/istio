@@ -23,35 +23,47 @@ import (
 	"time"
 
 	xdsapi "github.com/envoyproxy/go-control-plane/envoy/api/v2"
+	auth "github.com/envoyproxy/go-control-plane/envoy/api/v2/auth"
+	core "github.com/envoyproxy/go-control-plane/envoy/api/v2/core"
 	listener "github.com/envoyproxy/go-control-plane/envoy/api/v2/listener"
 	http_filter "github.com/envoyproxy/go-control-plane/envoy/config/filter/network/http_connection_manager/v2"
 	tcp_proxy "github.com/envoyproxy/go-control-plane/envoy/config/filter/network/tcp_proxy/v2"
+	thrift_proxy "github.com/envoyproxy/go-control-plane/envoy/config/filter/network/thrift_proxy/v2alpha1"
 	"github.com/envoyproxy/go-control-plane/pkg/conversion"
 	xdsutil "github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"github.com/gogo/protobuf/types"
 	"github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/ptypes"
+	"github.com/golang/protobuf/ptypes/wrappers"
+	"github.com/google/go-cmp/cmp"
 
 	meshconfig "istio.io/api/mesh/v1alpha1"
+	mixerClient "istio.io/api/mixer/v1/config/client"
+	"istio.io/api/networking/v1alpha3"
 	networking "istio.io/api/networking/v1alpha3"
 
 	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model"
+	istionetworking "istio.io/istio/pilot/pkg/networking"
 	"istio.io/istio/pilot/pkg/networking/core/v1alpha3/fakes"
 	"istio.io/istio/pilot/pkg/networking/plugin"
+	"istio.io/istio/pilot/pkg/networking/plugin/mixer/client"
 	"istio.io/istio/pilot/pkg/networking/util"
+	authnmodel "istio.io/istio/pilot/pkg/security/model"
 	"istio.io/istio/pilot/pkg/serviceregistry"
 	"istio.io/istio/pkg/config/host"
-	"istio.io/istio/pkg/config/labels"
 	"istio.io/istio/pkg/config/mesh"
 	"istio.io/istio/pkg/config/protocol"
-	"istio.io/istio/pkg/config/schemas"
+	"istio.io/istio/pkg/config/schema/collections"
+	"istio.io/istio/pkg/config/schema/resource"
+	proto2 "istio.io/istio/pkg/proto"
 )
 
 const (
-	wildcardIP           = "0.0.0.0"
-	fakePluginHTTPFilter = "fake-plugin-http-filter"
-	fakePluginTCPFilter  = "fake-plugin-tcp-filter"
+	wildcardIP                     = "0.0.0.0"
+	fakePluginHTTPFilter           = "fake-plugin-http-filter"
+	fakePluginTCPFilter            = "fake-plugin-tcp-filter"
+	fakePluginFilterChainMatchAlpn = "fake-plugin-alpn"
 )
 
 var (
@@ -113,9 +125,11 @@ var (
 		Metadata: &model.NodeMetadata{
 			ConfigNamespace: "not-default",
 			IstioVersion:    "1.4",
+			Labels: map[string]string{
+				"istio": "ingressgateway",
+			},
 		},
 		ConfigNamespace: "not-default",
-		WorkloadLabels:  labels.Collection{{"istio": "ingressgateway"}},
 	}
 	proxyInstances = []*model.ServiceInstance{
 		{
@@ -410,9 +424,6 @@ func TestOutboundListenerConflict_TCPWithCurrentTCP(t *testing.T) {
 }
 
 func TestOutboundListenerTCPWithVS(t *testing.T) {
-	_ = os.Setenv("PILOT_ENABLE_FALLTHROUGH_ROUTE", "false")
-
-	defer func() { _ = os.Unsetenv("PILOT_ENABLE_FALLTHROUGH_ROUTE") }()
 
 	tests := []struct {
 		name           string
@@ -443,8 +454,8 @@ func TestOutboundListenerTCPWithVS(t *testing.T) {
 			p := &fakePlugin{}
 			virtualService := model.Config{
 				ConfigMeta: model.ConfigMeta{
-					Type:      schemas.VirtualService.Type,
-					Version:   schemas.VirtualService.Version,
+					Type:      collections.IstioNetworkingV1Alpha3Virtualservices.Resource().Kind(),
+					Version:   collections.IstioNetworkingV1Alpha3Virtualservices.Resource().Version(),
 					Name:      "test_vs",
 					Namespace: "default",
 				},
@@ -470,10 +481,6 @@ func TestOutboundListenerTCPWithVS(t *testing.T) {
 }
 
 func TestOutboundListenerForHeadlessServices(t *testing.T) {
-	_ = os.Setenv("PILOT_ENABLE_FALLTHROUGH_ROUTE", "false")
-
-	defer func() { _ = os.Unsetenv("PILOT_ENABLE_FALLTHROUGH_ROUTE") }()
-
 	svc := buildServiceWithPort("test.com", 9999, protocol.TCP, tnow)
 	svc.Attributes.ServiceRegistry = string(serviceregistry.Kubernetes)
 	svc.Resolution = model.Passthrough
@@ -567,6 +574,91 @@ func TestOutboundListenerConfig_WithSidecar(t *testing.T) {
 	services = append(services, service4)
 	testOutboundListenerConfigWithSidecarWithCaptureModeNone(t, services...)
 	testOutboundListenerConfigWithSidecarWithUseRemoteAddress(t, services...)
+}
+
+func TestOutboundTlsTrafficWithoutTimeout(t *testing.T) {
+	services := []*model.Service{
+		{
+			CreationTime: tnow,
+			Hostname:     host.Name("test.com"),
+			Address:      wildcardIP,
+			ClusterVIPs:  make(map[string]string),
+			Ports: model.PortList{
+				&model.Port{
+					Name:     "https",
+					Port:     8080,
+					Protocol: protocol.HTTPS,
+				},
+			},
+			Resolution: model.Passthrough,
+			Attributes: model.ServiceAttributes{
+				Namespace: "default",
+			},
+		},
+		{
+			CreationTime: tnow,
+			Hostname:     host.Name("test1.com"),
+			Address:      wildcardIP,
+			ClusterVIPs:  make(map[string]string),
+			Ports: model.PortList{
+				&model.Port{
+					Name:     "foo",
+					Port:     9090,
+					Protocol: "unknown",
+				},
+			},
+			Resolution: model.Passthrough,
+			Attributes: model.ServiceAttributes{
+				Namespace: "default",
+			},
+		},
+	}
+	testOutboundListenerFilterTimeoutV14(t, services...)
+}
+
+func TestOutboundListenerConfigWithSidecarHTTPProxy(t *testing.T) {
+	p := &fakePlugin{}
+	sidecarConfig := &model.Config{
+		ConfigMeta: model.ConfigMeta{
+			Name:      "sidecar-with-http-proxy",
+			Namespace: "default",
+		},
+		Spec: &networking.Sidecar{
+			Egress: []*networking.IstioEgressListener{
+				{
+					Hosts: []string{"default/*"},
+					Port: &networking.Port{
+						Number:   15080,
+						Protocol: "HTTP_PROXY",
+						Name:     "15080",
+					},
+					Bind:        "127.0.0.1",
+					CaptureMode: v1alpha3.CaptureMode_NONE,
+				},
+			},
+		},
+	}
+	services := []*model.Service{buildService("httpbin.com", wildcardIP, protocol.HTTP, tnow.Add(1*time.Second))}
+
+	listeners := buildOutboundListeners(p, &proxy, sidecarConfig, nil, services...)
+
+	if expected := 1; len(listeners) != expected {
+		t.Fatalf("expected %d listeners, found %d", expected, len(listeners))
+	}
+	l := findListenerByPort(listeners, 15080)
+	if l == nil {
+		t.Fatalf("expected listener on port %d, but not found", 15080)
+	}
+	if len(l.FilterChains) != 1 {
+		t.Fatalf("expectd %d filter chains, found %d", 1, len(l.FilterChains))
+	} else {
+		if !isHTTPFilterChain(l.FilterChains[0]) {
+			t.Fatalf("expected http filter chain, found %s", l.FilterChains[1].Filters[0].Name)
+		}
+		if len(l.ListenerFilters) > 0 {
+			t.Fatalf("expected %d listener filter, found %d", 0, len(l.ListenerFilters))
+		}
+	}
 }
 
 func TestGetActualWildcardAndLocalHost(t *testing.T) {
@@ -675,6 +767,25 @@ func testOutboundListenerRouteV14(t *testing.T, services ...*model.Service) {
 	}
 }
 
+func testOutboundListenerFilterTimeoutV14(t *testing.T, services ...*model.Service) {
+	p := &fakePlugin{}
+	listeners := buildOutboundListeners(p, &proxy14, nil, nil, services...)
+	if len(listeners) != 2 {
+		t.Fatalf("expected %d listeners, found %d", 2, len(listeners))
+	}
+
+	if listeners[0].ContinueOnListenerFiltersTimeout {
+		t.Fatalf("expected timeout disabled, found ContinueOnListenerFiltersTimeout %v",
+			listeners[0].ContinueOnListenerFiltersTimeout)
+	}
+
+	if !listeners[1].ContinueOnListenerFiltersTimeout || listeners[1].ListenerFiltersTimeout == nil {
+		t.Fatalf("expected timeout enabled, found ContinueOnListenerFiltersTimeout %v, ListenerFiltersTimeout %v",
+			listeners[1].ContinueOnListenerFiltersTimeout,
+			listeners[1].ListenerFiltersTimeout)
+	}
+}
+
 func testOutboundListenerConflictV14(t *testing.T, services ...*model.Service) {
 	t.Helper()
 	oldestService := getOldestService(services...)
@@ -711,6 +822,12 @@ func testOutboundListenerConflictV14(t *testing.T, services ...*model.Service) {
 			t.Fatalf("expected %d listener filter, found %d", 2, len(listeners[0].ListenerFilters))
 		}
 
+		if !listeners[0].ContinueOnListenerFiltersTimeout || listeners[0].ListenerFiltersTimeout == nil {
+			t.Fatalf("exptected timeout, found ContinueOnListenerFiltersTimeout %v, ListenerFiltersTimeout %v",
+				listeners[0].ContinueOnListenerFiltersTimeout,
+				listeners[0].ListenerFiltersTimeout)
+		}
+
 		f := listeners[0].FilterChains[2].Filters[0]
 		cfg, _ := conversion.MessageToStruct(f.GetTypedConfig())
 		rds := cfg.Fields["rds"].GetStructValue().Fields["route_config_name"].GetStringValue()
@@ -736,6 +853,12 @@ func testOutboundListenerConflictV14(t *testing.T, services ...*model.Service) {
 			listeners[0].ListenerFilters[0].Name != "envoy.listener.tls_inspector" ||
 			listeners[0].ListenerFilters[1].Name != "envoy.listener.http_inspector" {
 			t.Fatalf("expected %d listener filter, found %d", 2, len(listeners[0].ListenerFilters))
+		}
+
+		if !listeners[0].ContinueOnListenerFiltersTimeout || listeners[0].ListenerFiltersTimeout == nil {
+			t.Fatalf("exptected timeout, found ContinueOnListenerFiltersTimeout %v, ListenerFiltersTimeout %v",
+				listeners[0].ContinueOnListenerFiltersTimeout,
+				listeners[0].ListenerFiltersTimeout)
 		}
 	}
 }
@@ -1034,6 +1157,13 @@ func testInboundListenerConfigWithSidecar(t *testing.T, proxy *model.Proxy, serv
 					},
 					Bind:            "1.1.1.1",
 					DefaultEndpoint: "127.0.0.1:80",
+					InboundTls: &networking.Server_TLSOptions{
+						Mode:              networking.Server_TLSOptions_MUTUAL,
+						ServerCertificate: "server-cert",
+						PrivateKey:        "private-key",
+						CaCertificates:    "ca",
+						SubjectAltNames:   []string{"subject.name.a.com", "subject.name.b.com"},
+					},
 				},
 			},
 		},
@@ -1046,7 +1176,48 @@ func testInboundListenerConfigWithSidecar(t *testing.T, proxy *model.Proxy, serv
 	if !isHTTPListener(listeners[0]) {
 		t.Fatal("expected HTTP listener, found TCP")
 	}
+	expectedTLSContext := &auth.DownstreamTlsContext{
+		CommonTlsContext: &auth.CommonTlsContext{
+			AlpnProtocols: util.ALPNHttp,
+			TlsCertificates: []*auth.TlsCertificate{
+				{
+					CertificateChain: &core.DataSource{
+						Specifier: &core.DataSource_Filename{
+							Filename: "server-cert",
+						},
+					},
+					PrivateKey: &core.DataSource{
+						Specifier: &core.DataSource_Filename{
+							Filename: "private-key",
+						},
+					},
+				},
+			},
+			ValidationContextType: &auth.CommonTlsContext_ValidationContext{
+				ValidationContext: &auth.CertificateValidationContext{
+					TrustedCa: &core.DataSource{
+						Specifier: &core.DataSource_Filename{
+							Filename: "ca",
+						},
+					},
+					VerifySubjectAltName: []string{"subject.name.a.com", "subject.name.b.com"},
+				},
+			},
+		},
+		RequireClientCertificate: &wrappers.BoolValue{Value: true},
+	}
+
 	for _, l := range listeners {
+		for _, fc := range l.FilterChains {
+			if fc.TransportSocket != nil {
+				tlscontext := &auth.DownstreamTlsContext{}
+				ptypes.UnmarshalAny(fc.TransportSocket.GetTypedConfig(), tlscontext)
+				if !reflect.DeepEqual(tlscontext, expectedTLSContext) {
+					t.Errorf("expected tlscontext:\n%v, but got:\n%v \n diff: %s", expectedTLSContext, tlscontext, cmp.Diff(expectedTLSContext, tlscontext))
+				}
+			}
+
+		}
 		verifyInboundHTTP10(t, isNodeHTTP10(proxy), l)
 	}
 }
@@ -1291,7 +1462,7 @@ func TestHttpProxyListener(t *testing.T) {
 	proxy.ServiceInstances = nil
 	env.Mesh().ProxyHttpPort = 15007
 	proxy.SidecarScope = model.DefaultSidecarScopeForNamespace(env.PushContext, "not-default")
-	httpProxy := configgen.buildHTTPProxy(&proxy, env.PushContext, nil)
+	httpProxy := configgen.buildHTTPProxy(&proxy, env.PushContext)
 	f := httpProxy.FilterChains[0].Filters[0]
 	cfg, _ := conversion.MessageToStruct(f.GetTypedConfig())
 
@@ -1560,16 +1731,16 @@ type fakePlugin struct {
 
 var _ plugin.Plugin = (*fakePlugin)(nil)
 
-func (p *fakePlugin) OnOutboundListener(in *plugin.InputParams, mutable *plugin.MutableObjects) error {
+func (p *fakePlugin) OnOutboundListener(in *plugin.InputParams, mutable *istionetworking.MutableObjects) error {
 	p.outboundListenerParams = append(p.outboundListenerParams, in)
 	return nil
 }
 
-func (p *fakePlugin) OnInboundListener(in *plugin.InputParams, mutable *plugin.MutableObjects) error {
+func (p *fakePlugin) OnInboundListener(in *plugin.InputParams, mutable *istionetworking.MutableObjects) error {
 	return nil
 }
 
-func (p *fakePlugin) OnVirtualListener(in *plugin.InputParams, mutable *plugin.MutableObjects) error {
+func (p *fakePlugin) OnVirtualListener(in *plugin.InputParams, mutable *istionetworking.MutableObjects) error {
 	return nil
 }
 
@@ -1585,8 +1756,8 @@ func (p *fakePlugin) OnOutboundRouteConfiguration(in *plugin.InputParams, routeC
 func (p *fakePlugin) OnInboundRouteConfiguration(in *plugin.InputParams, routeConfiguration *xdsapi.RouteConfiguration) {
 }
 
-func (p *fakePlugin) OnInboundFilterChains(in *plugin.InputParams) []plugin.FilterChain {
-	return []plugin.FilterChain{
+func (p *fakePlugin) OnInboundFilterChains(in *plugin.InputParams) []istionetworking.FilterChain {
+	return []istionetworking.FilterChain{
 		{
 			ListenerFilters: []*listener.ListenerFilter{
 				{
@@ -1598,16 +1769,16 @@ func (p *fakePlugin) OnInboundFilterChains(in *plugin.InputParams) []plugin.Filt
 	}
 }
 
-func (p *fakePlugin) OnInboundPassthrough(in *plugin.InputParams, mutable *plugin.MutableObjects) error {
+func (p *fakePlugin) OnInboundPassthrough(in *plugin.InputParams, mutable *istionetworking.MutableObjects) error {
 	switch in.ListenerProtocol {
-	case plugin.ListenerProtocolTCP:
+	case istionetworking.ListenerProtocolTCP:
 		for cnum := range mutable.FilterChains {
 			filter := &listener.Filter{
 				Name: fakePluginTCPFilter,
 			}
 			mutable.FilterChains[cnum].TCP = append(mutable.FilterChains[cnum].TCP, filter)
 		}
-	case plugin.ListenerProtocolHTTP:
+	case istionetworking.ListenerProtocolHTTP:
 		for cnum := range mutable.FilterChains {
 			filter := &http_filter.HttpFilter{
 				Name: fakePluginHTTPFilter,
@@ -1616,6 +1787,25 @@ func (p *fakePlugin) OnInboundPassthrough(in *plugin.InputParams, mutable *plugi
 		}
 	}
 	return nil
+}
+
+func (p *fakePlugin) OnInboundPassthroughFilterChains(in *plugin.InputParams) []istionetworking.FilterChain {
+	return []istionetworking.FilterChain{
+		// A filter chain configured by the plugin for mutual TLS support.
+		{
+			FilterChainMatch: &listener.FilterChainMatch{
+				ApplicationProtocols: []string{fakePluginFilterChainMatchAlpn},
+			},
+			TLSContext: &auth.DownstreamTlsContext{},
+			ListenerFilters: []*listener.ListenerFilter{
+				{
+					Name: xdsutil.TlsInspector,
+				},
+			},
+		},
+		// An empty filter chain for the default pass through behavior.
+		{},
+	}
 }
 
 func isHTTPListener(listener *xdsapi.Listener) bool {
@@ -1731,37 +1921,38 @@ func buildListenerEnvWithVirtualServices(services []*model.Service, virtualServi
 	}
 	serviceDiscovery.GetProxyServiceInstancesReturns(instances, nil)
 
-	configStore := &fakes.IstioConfigStore{
-		EnvoyFilterStub: func(workloadLabels labels.Collection) *model.Config {
-			return &model.Config{
-				ConfigMeta: model.ConfigMeta{
-					Name:      "test-envoyfilter",
-					Namespace: "not-default",
-				},
-				Spec: &networking.EnvoyFilter{
-					Filters: []*networking.EnvoyFilter_Filter{
-						{
-							InsertPosition: &networking.EnvoyFilter_InsertPosition{
-								Index: networking.EnvoyFilter_InsertPosition_FIRST,
-							},
-							FilterType:   networking.EnvoyFilter_Filter_HTTP,
-							FilterName:   "envoy.lua",
-							FilterConfig: &types.Struct{},
-						},
-					},
-				},
-			}
+	envoyFilter := model.Config{
+		ConfigMeta: model.ConfigMeta{
+			Name:      "test-envoyfilter",
+			Namespace: "not-default",
 		},
-		ListStub: func(typ, namespace string) (configs []model.Config, e error) {
-			if typ == "virtual-service" {
+		Spec: &networking.EnvoyFilter{
+			Filters: []*networking.EnvoyFilter_Filter{
+				{
+					InsertPosition: &networking.EnvoyFilter_InsertPosition{
+						Index: networking.EnvoyFilter_InsertPosition_FIRST,
+					},
+					FilterType:   networking.EnvoyFilter_Filter_HTTP,
+					FilterName:   "envoy.lua",
+					FilterConfig: &types.Struct{},
+				},
+			},
+		},
+	}
+	configStore := &fakes.IstioConfigStore{
+		ListStub: func(kind resource.GroupVersionKind, namespace string) (configs []model.Config, e error) {
+			switch kind {
+			case collections.IstioNetworkingV1Alpha3Virtualservices.Resource().GroupVersionKind():
 				result := make([]model.Config, len(virtualServices))
 				for i := range virtualServices {
 					result[i] = *virtualServices[i]
 				}
 				return result, nil
+			case collections.IstioNetworkingV1Alpha3Envoyfilters.Resource().GroupVersionKind():
+				return []model.Config{envoyFilter}, nil
+			default:
+				return nil, nil
 			}
-			return nil, nil
-
 		},
 	}
 
@@ -1848,6 +2039,476 @@ func TestAppendListenerFallthroughRoute(t *testing.T) {
 			}
 			if len(tests[idx].listener.FilterChains) != 1 {
 				t.Errorf("Expected exactly 1 filter chain on the tests[idx].listener")
+			}
+		})
+	}
+}
+
+func TestMergeTCPFilterChains(t *testing.T) {
+	push := &model.PushContext{
+		Mesh:        &meshconfig.MeshConfig{},
+		ProxyStatus: map[string]map[string]model.ProxyPushStatus{},
+	}
+
+	node := &model.Proxy{
+		ID:       "foo.bar",
+		Metadata: &model.NodeMetadata{},
+		SidecarScope: &model.SidecarScope{
+			OutboundTrafficPolicy: &networking.OutboundTrafficPolicy{
+				Mode: networking.OutboundTrafficPolicy_ALLOW_ANY,
+			},
+		},
+	}
+
+	tcpProxy := &tcp_proxy.TcpProxy{
+		StatPrefix:       "outbound|443||foo.com",
+		ClusterSpecifier: &tcp_proxy.TcpProxy_Cluster{Cluster: "outbound|443||foo.com"},
+	}
+
+	tcpProxyFilter := &listener.Filter{
+		Name:       xdsutil.TCPProxy,
+		ConfigType: &listener.Filter_TypedConfig{TypedConfig: util.MessageToAny(tcpProxy)},
+	}
+
+	tcpProxy = &tcp_proxy.TcpProxy{
+		StatPrefix:       "outbound|443||bar.com",
+		ClusterSpecifier: &tcp_proxy.TcpProxy_Cluster{Cluster: "outbound|443||bar.com"},
+	}
+
+	tcpProxyFilter2 := &listener.Filter{
+		Name:       xdsutil.TCPProxy,
+		ConfigType: &listener.Filter_TypedConfig{TypedConfig: util.MessageToAny(tcpProxy)},
+	}
+
+	svcPort := &model.Port{
+		Name:     "https",
+		Port:     443,
+		Protocol: protocol.HTTPS,
+	}
+	var l xdsapi.Listener
+	filterChains := []*listener.FilterChain{
+		{
+			FilterChainMatch: &listener.FilterChainMatch{
+				PrefixRanges: []*core.CidrRange{
+					{
+						AddressPrefix: "10.244.0.18",
+						PrefixLen:     &wrappers.UInt32Value{Value: 32},
+					},
+					{
+						AddressPrefix: "fe80::1c97:c3ff:fed7:5940",
+						PrefixLen:     &wrappers.UInt32Value{Value: 128},
+					},
+				},
+			},
+			Filters: nil, // This is not a valid config, just for test
+		},
+		{
+			FilterChainMatch: &listener.FilterChainMatch{
+				ServerNames: []string{"foo.com"},
+			},
+			// This is not a valid config, just for test
+			Filters: []*listener.Filter{tcpProxyFilter},
+		},
+		{
+			FilterChainMatch: &listener.FilterChainMatch{},
+			// This is not a valid config, just for test
+			Filters: buildOutboundCatchAllNetworkFiltersOnly(push, node),
+		},
+	}
+	l.FilterChains = filterChains
+	listenerMap := map[string]*outboundListenerEntry{
+		"0.0.0.0_443": {
+			servicePort: svcPort,
+			services: []*model.Service{{
+				CreationTime: tnow,
+				Hostname:     host.Name("foo.com"),
+				Address:      "192.168.1.1",
+				Ports:        []*model.Port{svcPort},
+				Resolution:   model.DNSLB,
+			}},
+			listener: &l,
+		},
+	}
+
+	insertFallthroughMetadata(listenerMap["0.0.0.0_443"].listener.FilterChains[2])
+
+	incomingFilterChains := []*listener.FilterChain{
+		{
+			FilterChainMatch: &listener.FilterChainMatch{},
+			// This is not a valid config, just for test
+			Filters: []*listener.Filter{tcpProxyFilter2},
+		},
+	}
+
+	svc := model.Service{
+		Hostname: "bar.com",
+	}
+
+	params := &plugin.InputParams{
+		ListenerProtocol: istionetworking.ListenerProtocolTCP,
+		Node:             node,
+		Port:             svcPort,
+		ServiceInstance:  &model.ServiceInstance{Service: &svc},
+		Push:             push,
+	}
+
+	out := mergeTCPFilterChains(incomingFilterChains, params, "0.0.0.0_443", listenerMap, node)
+
+	if len(out) != 3 {
+		t.Errorf("Got %d filter chains, expected 3", len(out))
+	}
+	if !isMatchAllFilterChain(out[2]) {
+		t.Errorf("The last filter chain  %#v is not wildcard matching", out[2])
+	}
+
+	if !reflect.DeepEqual(out[2].Filters, incomingFilterChains[0].Filters) {
+		t.Errorf("got %v\nwant %v\ndiff %v", out[2].Filters, incomingFilterChains[0].Filters, cmp.Diff(out[2].Filters, incomingFilterChains[0].Filters))
+	}
+}
+
+func TestOutboundRateLimitedThriftListenerConfig(t *testing.T) {
+	svcName := "thrift-service-unlimited"
+	svcIP := "127.0.22.2"
+	limitedSvcName := "thrift-service"
+	limitedSvcIP := "127.0.22.3"
+	if err := os.Setenv("PILOT_ENABLE_THRIFT_FILTER", "true"); err != nil {
+		t.Error(err.Error())
+	}
+	defer func() {
+		_ = os.Unsetenv(features.EnableThriftFilter.Name)
+	}()
+	services := []*model.Service{
+		buildService(svcName+".default.svc.cluster.local", svcIP, protocol.Thrift, tnow),
+		buildService(limitedSvcName+".default.svc.cluster.local", limitedSvcIP, protocol.Thrift, tnow)}
+
+	p := &fakePlugin{}
+	sidecarConfig := &model.Config{
+		ConfigMeta: model.ConfigMeta{
+			Name:      "foo",
+			Namespace: "not-default",
+		},
+		Spec: &networking.Sidecar{
+			Egress: []*networking.IstioEgressListener{
+				{
+					// None
+					CaptureMode: networking.CaptureMode_NONE,
+					Hosts:       []string{"*/*"},
+				},
+			},
+		},
+	}
+
+	configgen := NewConfigGenerator([]plugin.Plugin{p})
+
+	serviceDiscovery := new(fakes.ServiceDiscovery)
+	serviceDiscovery.ServicesReturns(services, nil)
+
+	quotaSpec := &client.Quota{
+		Quota:  "test",
+		Charge: 1,
+	}
+
+	configStore := &fakes.IstioConfigStore{
+		ListStub: func(kind resource.GroupVersionKind, s string) (configs []model.Config, err error) {
+			if kind.String() == collections.IstioMixerV1ConfigClientQuotaspecs.Resource().GroupVersionKind().String() {
+				return []model.Config{
+					{
+						ConfigMeta: model.ConfigMeta{
+							Type:      collections.IstioMixerV1ConfigClientQuotaspecs.Resource().Kind(),
+							Version:   collections.IstioMixerV1ConfigClientQuotaspecs.Resource().Version(),
+							Name:      limitedSvcName,
+							Namespace: "default",
+						},
+						Spec: quotaSpec,
+					},
+				}, nil
+			} else if kind.String() == collections.IstioMixerV1ConfigClientQuotaspecbindings.Resource().GroupVersionKind().String() {
+				return []model.Config{
+					{
+						ConfigMeta: model.ConfigMeta{
+							Type:      collections.IstioMixerV1ConfigClientQuotaspecs.Resource().Kind(),
+							Version:   collections.IstioMixerV1ConfigClientQuotaspecs.Resource().Version(),
+							Name:      limitedSvcName,
+							Namespace: "default",
+						},
+						Spec: &mixerClient.QuotaSpecBinding{
+							Services: []*mixerClient.IstioService{
+								{
+									Name:      "thrift-service",
+									Namespace: "default",
+									Domain:    "cluster.local",
+									Service:   "thrift-service.default.svc.cluster.local",
+								},
+							},
+							QuotaSpecs: []*mixerClient.QuotaSpecBinding_QuotaSpecReference{
+								{
+									Name:      "thrift-service",
+									Namespace: "default",
+								},
+							},
+						},
+					},
+				}, nil
+			}
+			return []model.Config{}, nil
+		},
+	}
+
+	m := mesh.DefaultMeshConfig()
+	m.ThriftConfig.RateLimitUrl = "ratelimit.svc.cluster.local"
+	env := model.Environment{
+		PushContext:      model.NewPushContext(),
+		ServiceDiscovery: serviceDiscovery,
+		IstioConfigStore: configStore,
+		Watcher:          mesh.NewFixedWatcher(&m),
+	}
+
+	if err := env.PushContext.InitContext(&env, nil, nil); err != nil {
+		t.Error(err.Error())
+	}
+
+	proxy.SidecarScope = model.ConvertToSidecarScope(env.PushContext, sidecarConfig, sidecarConfig.Namespace)
+	proxy.ServiceInstances = proxyInstances
+
+	listeners := configgen.buildSidecarOutboundListeners(&proxy, env.PushContext)
+
+	var thriftProxy thrift_proxy.ThriftProxy
+	thriftListener := findListenerByAddress(listeners, svcIP)
+	chains := thriftListener.GetFilterChains()
+	filters := chains[len(chains)-1].Filters
+	err := ptypes.UnmarshalAny(filters[len(filters)-1].GetTypedConfig(), &thriftProxy)
+	if err != nil {
+		t.Error(err.Error())
+	}
+	if len(thriftProxy.ThriftFilters) > 0 {
+		t.Fatal("No thrift filters should have been applied")
+	}
+	thriftListener = findListenerByAddress(listeners, limitedSvcIP)
+	chains = thriftListener.GetFilterChains()
+	filters = chains[len(chains)-1].Filters
+	err = ptypes.UnmarshalAny(filters[len(filters)-1].GetTypedConfig(), &thriftProxy)
+	if err != nil {
+		t.Error(err.Error())
+	}
+	if len(thriftProxy.ThriftFilters) == 0 {
+		t.Fatal("Thrift rate limit filter should have been applied")
+	}
+	var rateLimitApplied bool
+	for _, filter := range thriftProxy.ThriftFilters {
+		if filter.Name == "envoy.filters.thrift.rate_limit" {
+			rateLimitApplied = true
+			break
+		}
+	}
+	if !rateLimitApplied {
+		t.Error("No rate limit applied when one should have been")
+	}
+}
+
+func TestBuildSidecarListenerTlsContext(t *testing.T) {
+	testCases := []struct {
+		name       string
+		tls        *networking.Server_TLSOptions
+		nodeMeta   *model.NodeMetadata
+		sdsUdsPath string
+		result     *auth.DownstreamTlsContext
+	}{
+		{
+			name:   "no tls",
+			tls:    nil,
+			result: nil,
+		},
+		{
+			name: "tls SIMPLE",
+			tls: &networking.Server_TLSOptions{
+				Mode:              networking.Server_TLSOptions_SIMPLE,
+				ServerCertificate: "server-cert",
+				PrivateKey:        "private-key",
+			},
+			nodeMeta: &model.NodeMetadata{
+				UserSds: false,
+			},
+			result: &auth.DownstreamTlsContext{
+				CommonTlsContext: &auth.CommonTlsContext{
+					AlpnProtocols: util.ALPNHttp,
+					TlsCertificates: []*auth.TlsCertificate{
+						{
+							CertificateChain: &core.DataSource{
+								Specifier: &core.DataSource_Filename{
+									Filename: "server-cert",
+								},
+							},
+							PrivateKey: &core.DataSource{
+								Specifier: &core.DataSource_Filename{
+									Filename: "private-key",
+								},
+							},
+						},
+					},
+				},
+				RequireClientCertificate: proto2.BoolFalse,
+			},
+		},
+		{
+			name: "tls MUTUAL without sds",
+			tls: &networking.Server_TLSOptions{
+				Mode:              networking.Server_TLSOptions_MUTUAL,
+				ServerCertificate: "server-cert",
+				PrivateKey:        "private-key",
+				CaCertificates:    "ca",
+			},
+			nodeMeta: &model.NodeMetadata{
+				UserSds: false,
+			},
+			result: &auth.DownstreamTlsContext{
+				CommonTlsContext: &auth.CommonTlsContext{
+					AlpnProtocols: util.ALPNHttp,
+					TlsCertificates: []*auth.TlsCertificate{
+						{
+							CertificateChain: &core.DataSource{
+								Specifier: &core.DataSource_Filename{
+									Filename: "server-cert",
+								},
+							},
+							PrivateKey: &core.DataSource{
+								Specifier: &core.DataSource_Filename{
+									Filename: "private-key",
+								},
+							},
+						},
+					},
+					ValidationContextType: &auth.CommonTlsContext_ValidationContext{
+						ValidationContext: &auth.CertificateValidationContext{
+							TrustedCa: &core.DataSource{
+								Specifier: &core.DataSource_Filename{
+									Filename: "ca",
+								},
+							},
+						},
+					},
+				},
+				RequireClientCertificate: proto2.BoolTrue,
+			},
+		},
+		{
+			name: "tls MUTUAL with san without sds",
+			tls: &networking.Server_TLSOptions{
+				Mode:              networking.Server_TLSOptions_MUTUAL,
+				ServerCertificate: "server-cert",
+				PrivateKey:        "private-key",
+				CaCertificates:    "ca",
+				SubjectAltNames:   []string{"subject.name.a.com", "subject.name.b.com"},
+			},
+			nodeMeta: &model.NodeMetadata{
+				UserSds: false,
+			},
+			result: &auth.DownstreamTlsContext{
+				CommonTlsContext: &auth.CommonTlsContext{
+					AlpnProtocols: util.ALPNHttp,
+					TlsCertificates: []*auth.TlsCertificate{
+						{
+							CertificateChain: &core.DataSource{
+								Specifier: &core.DataSource_Filename{
+									Filename: "server-cert",
+								},
+							},
+							PrivateKey: &core.DataSource{
+								Specifier: &core.DataSource_Filename{
+									Filename: "private-key",
+								},
+							},
+						},
+					},
+					ValidationContextType: &auth.CommonTlsContext_ValidationContext{
+						ValidationContext: &auth.CertificateValidationContext{
+							TrustedCa: &core.DataSource{
+								Specifier: &core.DataSource_Filename{
+									Filename: "ca",
+								},
+							},
+							VerifySubjectAltName: []string{"subject.name.a.com", "subject.name.b.com"},
+						},
+					},
+				},
+				RequireClientCertificate: proto2.BoolTrue,
+			},
+		},
+		{
+			name: "tls MUTUAL with sds",
+			tls: &networking.Server_TLSOptions{
+				Mode:            networking.Server_TLSOptions_MUTUAL,
+				CredentialName:  "test",
+				SubjectAltNames: []string{"subject.name.a.com", "subject.name.b.com"},
+			},
+			nodeMeta: &model.NodeMetadata{
+				UserSds: true,
+			},
+			sdsUdsPath: "unix:/var/run/sidecar/sds",
+			result: &auth.DownstreamTlsContext{
+				CommonTlsContext: &auth.CommonTlsContext{
+					AlpnProtocols: util.ALPNHttp,
+					TlsCertificateSdsSecretConfigs: []*auth.SdsSecretConfig{
+						{
+							Name: "test",
+							SdsConfig: &core.ConfigSource{
+								InitialFetchTimeout: features.InitialFetchTimeout,
+								ConfigSourceSpecifier: &core.ConfigSource_ApiConfigSource{
+									ApiConfigSource: &core.ApiConfigSource{
+										ApiType: core.ApiConfigSource_GRPC,
+										GrpcServices: []*core.GrpcService{
+											{
+												TargetSpecifier: &core.GrpcService_GoogleGrpc_{
+													GoogleGrpc: &core.GrpcService_GoogleGrpc{
+														TargetUri:  "unix:/var/run/sidecar/sds",
+														StatPrefix: authnmodel.SDSStatPrefix,
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+					ValidationContextType: &auth.CommonTlsContext_CombinedValidationContext{
+						CombinedValidationContext: &auth.CommonTlsContext_CombinedCertificateValidationContext{
+							DefaultValidationContext: &auth.CertificateValidationContext{
+								VerifySubjectAltName: []string{"subject.name.a.com", "subject.name.b.com"},
+							},
+							ValidationContextSdsSecretConfig: &auth.SdsSecretConfig{
+								Name: "test-cacert",
+								SdsConfig: &core.ConfigSource{
+									InitialFetchTimeout: features.InitialFetchTimeout,
+									ConfigSourceSpecifier: &core.ConfigSource_ApiConfigSource{
+										ApiConfigSource: &core.ApiConfigSource{
+											ApiType: core.ApiConfigSource_GRPC,
+											GrpcServices: []*core.GrpcService{
+												{
+													TargetSpecifier: &core.GrpcService_GoogleGrpc_{
+														GoogleGrpc: &core.GrpcService_GoogleGrpc{
+															TargetUri:  "unix:/var/run/sidecar/sds",
+															StatPrefix: authnmodel.SDSStatPrefix,
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				RequireClientCertificate: proto2.BoolTrue,
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ret := buildSidecarListenerTLSContext(tc.tls, tc.nodeMeta, tc.sdsUdsPath)
+			if !reflect.DeepEqual(tc.result, ret) {
+				t.Errorf("expecting\n %v but got\n %v\n diff: %s", tc.result, ret, cmp.Diff(tc.result, ret))
 			}
 		})
 	}

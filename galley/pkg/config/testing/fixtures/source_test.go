@@ -19,8 +19,8 @@ import (
 
 	"github.com/onsi/gomega"
 
-	"istio.io/istio/galley/pkg/config/event"
-	"istio.io/istio/galley/pkg/config/testing/data"
+	"istio.io/istio/galley/pkg/config/testing/basicmeta"
+	"istio.io/istio/pkg/config/event"
 )
 
 func TestSource(t *testing.T) {
@@ -59,7 +59,7 @@ func TestSource_Handle(t *testing.T) {
 
 	e := event.Event{
 		Kind:     event.Added,
-		Source:   data.Collection1,
+		Source:   basicmeta.K8SCollection1,
 		Resource: nil,
 	}
 	s.Handle(e)

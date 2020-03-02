@@ -102,12 +102,6 @@ test/local/auth/e2e_pilotv2: generate_e2e_yaml
 	# Run the pilot controller tests
 	go test -v -timeout ${E2E_TIMEOUT} ./tests/e2e/tests/controller
 
-e2e_cloudfoundry: init
-	iptables -t nat -A OUTPUT -d 127.1.1.1/32 -p tcp -j REDIRECT --to-port 15001
-	go test -v -timeout ${E2E_TIMEOUT} ./tests/e2e/tests/pilot/cloudfoundry ${T} \
-		${CAPTURE_LOG}
-	iptables -t nat -F
-
 test/local/auth/e2e_bookinfo_envoyv2: generate_e2e_yaml
 	go test -v -timeout ${E2E_TIMEOUT} ./tests/e2e/tests/bookinfo \
 		--auth_enable=true --egress=true --ingress=false --rbac_enable=false \
@@ -137,3 +131,21 @@ $(e2e_files): $(HOME)/.helm istio-init.yaml
 		--values install/kubernetes/helm/istio/test-values/values-$@ \
 		install/kubernetes/helm/istio >> install/kubernetes/$@
 
+
+helm3/test/install:
+	helm3 install istio-base manifests/base
+	helm3 install -n istio-system istio-16 manifests/istio-control/istio-discovery -f manifests/global.yaml
+	helm3 install -n istio-system istio-canary manifests/istio-control/istio-discovery -f manifests/global.yaml  \
+		--set revision=canary
+
+helm3/test/upgrade:
+	helm3 upgrade istio-base manifests/base
+	helm3 upgrade -n istio-system istio-16 manifests/istio-control/istio-discovery -f manifests/global.yaml
+	helm3 upgrade -n istio-system istio-canary manifests/istio-control/istio-discovery -f manifests/global.yaml  \
+		--set revision=canary
+
+helm3/test/uninstall:
+	helm3 delete -n istio-system istio-16 || true
+	helm3 delete -n istio-system istio-canary || true
+	helm3 delete istio-base || true
+	kubectl delete crd -l release=istio || true

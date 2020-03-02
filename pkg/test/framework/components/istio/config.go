@@ -38,16 +38,16 @@ const (
 	// DefaultSystemNamespace default value for SystemNamespace
 	DefaultSystemNamespace = "istio-system"
 
-	// ValuesMcpFile for Istio Helm deployment.
-	E2EValuesFile = "test-values/values-e2e.yaml"
+	// E2EValuesFile for default settings for Istio Helm deployment.
+	// This modifies a few values to help tests, like prometheus scrape interval
+	// In general, specific settings should be added to tests, not here
+	E2EValuesFile = "test-values/values-integ.yaml"
 
 	// DefaultDeployTimeout for Istio
 	DefaultDeployTimeout = time.Second * 300
 
-	// TODO(https://github.com/istio/istio/issues/12606): This timeout is insanely large, but Prow seems to take a lot of time
-	//  pulling images.
 	// DefaultCIDeployTimeout for Istio
-	DefaultCIDeployTimeout = time.Minute * 20
+	DefaultCIDeployTimeout = time.Minute * 10
 
 	// DefaultUndeployTimeout for Istio.
 	DefaultUndeployTimeout = time.Second * 300
@@ -67,12 +67,10 @@ var (
 		PolicyNamespace:                DefaultSystemNamespace,
 		IngressNamespace:               DefaultSystemNamespace,
 		EgressNamespace:                DefaultSystemNamespace,
-		Operator:                       false,
 		DeployIstio:                    true,
 		DeployTimeout:                  0,
 		UndeployTimeout:                0,
 		ChartDir:                       env.IstioChartDir,
-		CrdsFilesDir:                   env.CrdsFilesDir,
 		ValuesFile:                     E2EValuesFile,
 		CustomSidecarInjectorNamespace: "",
 	}
@@ -110,9 +108,6 @@ type Config struct {
 	// The top-level Helm chart dir.
 	ChartDir string
 
-	// The top-level Helm Crds files dir.
-	CrdsFilesDir string
-
 	// The Helm values file to be used.
 	ValuesFile string
 
@@ -126,9 +121,6 @@ type Config struct {
 
 	// Indicates that the test should deploy Istio into the target Kubernetes cluster before running tests.
 	DeployIstio bool
-
-	// Operator determines if we should use the operator for installation
-	Operator bool
 
 	// Do not wait for the validation webhook before completing the deployment. This is useful for
 	// doing deployments without Galley.
@@ -170,29 +162,33 @@ func (c *Config) IsMtlsEnabled() bool {
 	return true
 }
 
-func (c *Config) IstioControlPlane() string {
-	data := c.ControlPlaneValues
-	if data == "" && c.ValuesFile != "" {
-		var err error
-		data, err = file.AsString(filepath.Join(c.ChartDir, c.ValuesFile))
+func (c *Config) IstioOperator() string {
+	data := ""
+	if c.ControlPlaneValues != "" {
+		data = Indent(c.ControlPlaneValues, "  ")
+	} else if c.ValuesFile != "" {
+		valfile, err := file.AsString(filepath.Join(c.ChartDir, c.ValuesFile))
 		if err != nil {
 			return ""
 		}
+		data = fmt.Sprintf(`
+  values:
+%s`, Indent(valfile, "    "))
 	}
+
 	s, err := image.SettingsFromCommandLine()
 	if err != nil {
 		return ""
 	}
 
 	return fmt.Sprintf(`
-apiVersion: install.istio.io/v1alpha2
-kind: IstioControlPlane
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
 spec:
   hub: %s
   tag: %s
-  values:
 %s
-`, s.Hub, s.Tag, Indent(data, "    "))
+`, s.Hub, s.Tag, data)
 }
 
 // indents a block of text with an indent string
@@ -221,10 +217,6 @@ func DefaultConfig(ctx resource.Context) (Config, error) {
 	}
 
 	if err := checkFileExists(filepath.Join(s.ChartDir, s.ValuesFile)); err != nil {
-		return Config{}, err
-	}
-
-	if err := normalizeFile(&s.CrdsFilesDir); err != nil {
 		return Config{}, err
 	}
 
@@ -337,12 +329,10 @@ func (c *Config) String() string {
 	result += fmt.Sprintf("IngressNamespace:               %s\n", c.IngressNamespace)
 	result += fmt.Sprintf("EgressNamespace:                %s\n", c.EgressNamespace)
 	result += fmt.Sprintf("DeployIstio:                    %v\n", c.DeployIstio)
-	result += fmt.Sprintf("Operator:                       %v\n", c.Operator)
 	result += fmt.Sprintf("DeployTimeout:                  %s\n", c.DeployTimeout.String())
 	result += fmt.Sprintf("UndeployTimeout:                %s\n", c.UndeployTimeout.String())
 	result += fmt.Sprintf("Values:                         %v\n", c.Values)
 	result += fmt.Sprintf("ChartDir:                       %s\n", c.ChartDir)
-	result += fmt.Sprintf("CrdsFilesDir:                   %s\n", c.CrdsFilesDir)
 	result += fmt.Sprintf("ValuesFile:                     %s\n", c.ValuesFile)
 	result += fmt.Sprintf("SkipWaitForValidationWebhook:   %v\n", c.SkipWaitForValidationWebhook)
 	result += fmt.Sprintf("CustomSidecarInjectorNamespace: %s\n", c.CustomSidecarInjectorNamespace)

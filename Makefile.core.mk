@@ -19,10 +19,10 @@ ISTIO_GO := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 export ISTIO_GO
 SHELL := /bin/bash -o pipefail
 
-VERSION ?= 1.5-dev
+VERSION ?= 1.6-dev
 
 # Base version of Istio image to use
-BASE_VERSION ?= 1.5-dev.0
+BASE_VERSION ?= 1.6-dev.0
 
 export GO111MODULE ?= on
 export GOPROXY ?= https://proxy.golang.org
@@ -86,6 +86,22 @@ export ISTIO_BIN=$(GOBIN)
 
 export ISTIO_OUT:=$(TARGET_OUT)
 export ISTIO_OUT_LINUX:=$(TARGET_OUT_LINUX)
+
+# LOCAL_OUT should point to architecture where we are currently running versus the desired.
+# This is used when we need to run a build artifact during tests or later as part of another
+# target. If we are running in the Linux build container on non Linux hosts, we add the
+# linux binaries to the build dependencies, BUILD_DEPS, which can be added to other targets
+# that would need the Linux binaries (ex. tests).
+BUILD_DEPS:=
+ifeq ($(IN_BUILD_CONTAINER),1)
+  export LOCAL_OUT := $(ISTIO_OUT_LINUX)
+  ifneq ($(GOOS_LOCAL),"linux")
+    BUILD_DEPS += build-linux
+  endif
+else
+  export LOCAL_OUT := $(ISTIO_OUT)
+endif
+
 export HELM=helm
 export ARTIFACTS ?= $(ISTIO_OUT)
 export JUNIT_OUT ?= $(ARTIFACTS)/junit.xml
@@ -189,6 +205,7 @@ ifeq ($(PULL_POLICY),)
   $(error "PULL_POLICY cannot be empty")
 endif
 
+include operator/operator.mk
 
 .PHONY: default
 default: init build test
@@ -197,15 +214,16 @@ default: init build test
 # Downloads envoy, based on the SHA defined in the base pilot Dockerfile
 init: $(ISTIO_OUT)/istio_is_init
 	mkdir -p ${TARGET_OUT}/logs
+	mkdir -p ${TARGET_OUT}/release
 
 # I tried to make this dependent on what I thought was the appropriate
 # lock file, but it caused the rule for that file to get run (which
 # seems to be about obtaining a new version of the 3rd party libraries).
 $(ISTIO_OUT)/istio_is_init: bin/init.sh istio.deps | $(ISTIO_OUT)
-	ISTIO_OUT=$(ISTIO_OUT) ISTIO_BIN=$(ISTIO_BIN) bin/init.sh
+	ISTIO_OUT=$(ISTIO_OUT) ISTIO_BIN=$(ISTIO_BIN) GOOS_LOCAL=$(GOOS_LOCAL) bin/init.sh
 	touch $(ISTIO_OUT)/istio_is_init
 
-# init.sh downloads envoy
+# init.sh downloads envoy and webassembly plugins
 ${ISTIO_OUT}/envoy: init
 ${ISTIO_ENVOY_LINUX_DEBUG_PATH}: init
 ${ISTIO_ENVOY_LINUX_RELEASE_PATH}: init
@@ -216,6 +234,7 @@ ${ISTIO_ENVOY_MACOS_RELEASE_PATH}: init
 depend: init | $(ISTIO_OUT)
 
 DIRS_TO_CLEAN := $(ISTIO_OUT)
+DIRS_TO_CLEAN += $(ISTIO_OUT_LINUX)
 
 $(OUTPUT_DIRS):
 	@mkdir -p $@
@@ -246,36 +265,25 @@ buildcache:
 BINARIES:=./istioctl/cmd/istioctl \
   ./pilot/cmd/pilot-discovery \
   ./pilot/cmd/pilot-agent \
-  ./sidecar-injector/cmd/sidecar-injector \
   ./mixer/cmd/mixs \
   ./mixer/cmd/mixc \
   ./mixer/tools/mixgen \
   ./galley/cmd/galley \
   ./security/cmd/node_agent \
-  ./security/cmd/node_agent_k8s \
   ./security/cmd/istio_ca \
   ./security/tools/sdsclient \
   ./pkg/test/echo/cmd/client \
   ./pkg/test/echo/cmd/server \
   ./mixer/test/policybackend \
-  ./tools/hyperistio \
   ./tools/istio-iptables \
-  ./tools/istio-clean-iptables
+  ./tools/istio-clean-iptables \
+  ./operator/cmd/operator
 
 # List of binaries included in releases
-RELEASE_BINARIES:=pilot-discovery pilot-agent sidecar-injector mixc mixs mixgen node_agent node_agent_k8s istio_ca istioctl galley sdsclient
-
-# We always build Linux containers even if not running in a Linux. Linux binaries
-# are needed for packaging in Docker. On other GOOS_LOCAL, such as darwin, we need
-# to specially build Linux binaries. Otherwise, the default build target will build
-# Linux on Linux platforms.
-BUILD_DEPS:=
-ifneq ($(GOOS_LOCAL),"linux")
-BUILD_DEPS += build-linux
-endif
+RELEASE_BINARIES:=pilot-discovery pilot-agent mixc mixs mixgen node_agent istio_ca istioctl galley sdsclient
 
 .PHONY: build
-build: depend $(BUILD_DEPS)
+build: depend
 	STATIC=0 GOOS=$(GOOS_LOCAL) GOARCH=$(GOARCH_LOCAL) LDFLAGS='-extldflags -static -s -w' common/scripts/gobuild.sh $(ISTIO_OUT)/ $(BINARIES)
 
 # The build-linux target is responsible for building binaries used within containers.
@@ -318,26 +326,42 @@ lint-go-split:
 	@golangci-lint run -c ./common/config/.golangci.yml ./pkg/...
 	@golangci-lint run -c ./common/config/.golangci.yml ./samples/...
 	@golangci-lint run -c ./common/config/.golangci.yml ./security/...
-	@golangci-lint run -c ./common/config/.golangci.yml ./sidecar-injector/...
 	@golangci-lint run -c ./common/config/.golangci.yml ./tests/...
 	@golangci-lint run -c ./common/config/.golangci.yml ./tools/...
+	@golangci-lint run -c ./common/config/.golangci.yml ./operator/...
 
-lint: lint-go-split lint-python lint-copyright-banner lint-scripts lint-dockerfiles lint-markdown lint-yaml lint-licenses
-	@bin/check_helm.sh
+lint-helm-global:
+	find manifests -name 'Chart.yaml' -print0 | ${XARGS} -L 1 dirname | xargs -r helm lint --strict -f manifests/global.yaml
+
+lint: lint-python lint-copyright-banner lint-scripts lint-go lint-dockerfiles lint-markdown lint-yaml lint-licenses lint-helm-global
 	@bin/check_samples.sh
-	@bin/check_dashboards.sh
 	@go run mixer/tools/adapterlinter/main.go ./mixer/adapter/...
 	@testlinter
-	@envvarlinter galley istioctl mixer pilot security sidecar-injector
+	@envvarlinter galley istioctl mixer pilot security
 
 go-gen:
 	@mkdir -p /tmp/bin
 	@go build -o /tmp/bin/mixgen "${REPO_ROOT}/mixer/tools/mixgen/main.go"
 	@PATH="${PATH}":/tmp/bin go generate ./...
 
-gen: go-gen mirror-licenses format update-crds
+gen-charts:
+	@operator/scripts/run_update_charts.sh
+
+refresh-goldens:
+	@REFRESH_GOLDEN=true go test ./operator/...
+	@REFRESH_GOLDEN=true go test ./pkg/kube/inject/...
+
+update-golden: refresh-goldens
+
+gen: go-gen mirror-licenses format update-crds operator-proto gen-charts update-golden gen-kustomize
 
 gen-check: gen check-clean-repo
+
+# Generate kustomize templates.
+gen-kustomize:
+	helm template -n istio-base manifests/base > manifests/base/files/gen-istio-cluster.yaml
+	helm template -n istio-base --namespace istio-system manifests/istio-control/istio-discovery \
+		-f manifests/global.yaml > manifests/istio-control/istio-discovery/files/gen-istio.yaml
 
 #-----------------------------------------------------------------------------
 # Target: go build
@@ -359,11 +383,11 @@ ${ISTIO_OUT}/release/istioctl-win.exe: depend
 
 # generate the istioctl completion files
 ${ISTIO_OUT}/release/istioctl.bash: istioctl
-	${ISTIO_OUT}/istioctl collateral --bash && \
+	${LOCAL_OUT}/istioctl collateral --bash && \
 	mv istioctl.bash ${ISTIO_OUT}/release/istioctl.bash
 
 ${ISTIO_OUT}/release/_istioctl: istioctl
-	${ISTIO_OUT}/istioctl collateral --zsh && \
+	${LOCAL_OUT}/istioctl collateral --zsh && \
 	mv _istioctl ${ISTIO_OUT}/release/_istioctl
 
 .PHONY: binaries-test
@@ -379,9 +403,8 @@ istioctl.completion: ${ISTIO_OUT}/release/istioctl.bash ${ISTIO_OUT}/release/_is
 
 # istioctl-install builds then installs istioctl into $GOPATH/BIN
 # Used for debugging istioctl during dev work
-.PHONY: istioctl-install
-istioctl-install:
-	go install istio.io/istio/istioctl/cmd/istioctl
+.PHONY: istioctl-install-container
+istioctl-install-container: istioctl
 
 #-----------------------------------------------------------------------------
 # Target: test
@@ -400,7 +423,7 @@ with_junit_report: | $(JUNIT_REPORT)
 
 # Run coverage tests
 ifeq ($(WHAT),)
-       TEST_OBJ = common-test pilot-test mixer-test security-test galley-test istioctl-test
+       TEST_OBJ = common-test pilot-test mixer-test security-test galley-test istioctl-test operator-test
 else
        TEST_OBJ = selected-pkg-test
 endif
@@ -409,42 +432,33 @@ test: | $(JUNIT_REPORT)
 	$(MAKE) -e -f Makefile.core.mk --keep-going $(TEST_OBJ) \
 	2>&1 | tee >($(JUNIT_REPORT) > $(JUNIT_OUT))
 
-GOTEST_PARALLEL ?= '-test.parallel=1'
+# TODO: remove the racetest targets and just have *-test targets that call race
 
 .PHONY: pilot-test
-pilot-test:
-	go test ${T} ./pilot/...
+pilot-test: pilot-racetest
 
 .PHONY: istioctl-test
-istioctl-test:
-	go test ${T} ./istioctl/...
+istioctl-test: istioctl-racetest
+
+.PHONY: operator-test
+operator-test:
+	go test ${T} ./operator/...
 
 .PHONY: mixer-test
-MIXER_TEST_T ?= ${T} ${GOTEST_PARALLEL}
-mixer-test:
-	# Some tests use relative path "testdata", must be run from mixer dir
-	(cd mixer; go test ${MIXER_TEST_T} ./...)
+mixer-test: mixer-racetest
 
 .PHONY: galley-test
-galley-test:
-	go test ${T} ./galley/...
+galley-test: galley-racetest
 
 .PHONY: security-test
-security-test:
-	go test ${T} ./security/pkg/...
-	go test ${T} ./security/cmd/...
+security-test: security-racetest
 
 .PHONY: common-test
-common-test: build
-	go test ${T} ./pkg/...
-	go test ${T} ./tests/common/...
-	# Execute bash shell unit tests scripts
-	./tests/scripts/scripts_test.sh
-	./tests/scripts/istio-iptables-test.sh
+common-test: common-racetest
 
 .PHONY: selected-pkg-test
 selected-pkg-test:
-	find ${WHAT} -name "*_test.go" | xargs -I {} dirname {} | uniq | xargs -I {} go test ${T} ./{}
+	find ${WHAT} -name "*_test.go" | xargs -I {} dirname {} | uniq | xargs -I {} go test ${T} -race ./{}
 
 #-----------------------------------------------------------------------------
 # Target: coverage
@@ -489,37 +503,40 @@ common-coverage:
 
 .PHONY: racetest
 
-RACE_TESTS ?= pilot-racetest mixer-racetest security-racetest galley-test common-racetest istioctl-racetest
+RACE_TESTS ?= pilot-racetest mixer-racetest security-racetest galley-test common-racetest istioctl-racetest operator-racetest
 racetest: $(JUNIT_REPORT)
 	$(MAKE) -e -f Makefile.core.mk --keep-going $(RACE_TESTS) \
 	2>&1 | tee >($(JUNIT_REPORT) > $(JUNIT_OUT))
 
 .PHONY: pilot-racetest
 pilot-racetest:
-	RACE_TEST=true go test ${T} -race ./pilot/...
+	go test ${T} -race ./pilot/...
 
 .PHONY: istioctl-racetest
 istioctl-racetest:
-	RACE_TEST=true go test ${T} -race ./istioctl/...
+	go test ${T} -race ./istioctl/...
+
+.PHONY: operator-racetest
+operator-racetest:
+	RACE_TEST=true go test ${T} -race ./operator/...
 
 .PHONY: mixer-racetest
 mixer-racetest:
-	# Some tests use relative path "testdata", must be run from mixer dir
-	(cd mixer; RACE_TEST=true go test ${T} -race ./...)
+	go test ${T} -race ./mixer/...
 
 .PHONY: galley-racetest
 galley-racetest:
-	RACE_TEST=true go test ${T} -race ./galley/...
+	go test ${T} -race ./galley/...
 
 .PHONY: security-racetest
 security-racetest:
-	RACE_TEST=true go test ${T} -race ./security/pkg/... ./security/cmd/...
+	go test ${T} -race ./security/pkg/... ./security/cmd/...
 
 .PHONY: common-racetest
-common-racetest:
+common-racetest: ${BUILD_DEPS}
 	# Execute bash shell unit tests scripts
-	./tests/scripts/istio-iptables-test.sh
-	RACE_TEST=true go test ${T} -race ./pkg/...
+	LOCAL_OUT=$(LOCAL_OUT) ./tests/scripts/istio-iptables-test.sh
+	go test ${T} -race ./pkg/... ./tests/common/... ./tools/istio-iptables/...
 
 #-----------------------------------------------------------------------------
 # Target: clean
@@ -591,7 +608,7 @@ FILES_TO_CLEAN+=install/consul/istio.yaml \
                 install/kubernetes/istio-one-namespace-trust-domain.yaml \
                 install/kubernetes/istio-one-namespace.yaml \
                 install/kubernetes/istio.yaml \
-                samples/bookinfo/platform/consul/bookinfo.sidecars.yaml 
+                samples/bookinfo/platform/consul/bookinfo.sidecars.yaml
 
 #-----------------------------------------------------------------------------
 # Target: environment and tools
@@ -609,9 +626,6 @@ show.goenv: ; $(info $(H) go environment...)
 # show makefile variables. Usage: make show.<variable-name>
 show.%: ; $(info $* $(H) $($*))
 	$(Q) true
-
-# Deprecated. This target exists only to satisify old CI tests that cannot be updated atomically, and can be removed.
-localTestEnv:
 
 #-----------------------------------------------------------------------------
 # Target: custom resource definitions

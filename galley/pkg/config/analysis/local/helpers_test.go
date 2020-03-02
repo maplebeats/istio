@@ -20,17 +20,17 @@ import (
 
 	"github.com/gogo/protobuf/types"
 
-	"istio.io/istio/galley/pkg/config/event"
-	"istio.io/istio/galley/pkg/config/resource"
 	"istio.io/istio/galley/pkg/config/source/kube/rt"
-	"istio.io/istio/galley/pkg/config/testing/data"
+	"istio.io/istio/galley/pkg/config/testing/basicmeta"
+	"istio.io/istio/pkg/config/event"
+	"istio.io/istio/pkg/config/resource"
 )
 
 func createTestEvent(t *testing.T, k event.Kind, r *resource.Instance) event.Event {
 	t.Helper()
 	return event.Event{
 		Kind:     k,
-		Source:   data.Collection1,
+		Source:   basicmeta.K8SCollection1,
 		Resource: r,
 	}
 }

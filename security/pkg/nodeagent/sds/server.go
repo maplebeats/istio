@@ -102,6 +102,18 @@ type Options struct {
 	// UseLocalJWT is set when the sds server should use its own local JWT, and not expect one
 	// from the UDS caller. Used when it runs in the same container with Envoy.
 	UseLocalJWT bool
+
+	// Whether to generate PKCS#8 private keys.
+	Pkcs8Keys bool
+
+	// PilotCertProvider is the provider of the Pilot certificate.
+	PilotCertProvider string
+
+	// JWTPath is the path for the JWT token
+	JWTPath string
+
+	// OutputKeyCertToDir is the directory for output the key and certificate
+	OutputKeyCertToDir string
 }
 
 // Server is the gPRC server that exposes SDS through UDS.
@@ -120,8 +132,10 @@ type Server struct {
 // NewServer creates and starts the Grpc server for SDS.
 func NewServer(options Options, workloadSecretCache, gatewaySecretCache cache.SecretManager) (*Server, error) {
 	s := &Server{
-		workloadSds: newSDSService(workloadSecretCache, false, options.UseLocalJWT, options.RecycleInterval),
-		gatewaySds:  newSDSService(gatewaySecretCache, true, options.UseLocalJWT, options.RecycleInterval),
+		workloadSds: newSDSService(workloadSecretCache, false, options.UseLocalJWT,
+			options.RecycleInterval, options.JWTPath, options.OutputKeyCertToDir),
+		gatewaySds: newSDSService(gatewaySecretCache, true, options.UseLocalJWT,
+			options.RecycleInterval, options.JWTPath, options.OutputKeyCertToDir),
 	}
 	if options.EnableWorkloadSDS {
 		if err := s.initWorkloadSdsService(&options); err != nil {
@@ -234,7 +248,7 @@ func (s *Server) initWorkloadSdsService(options *Options) error { //nolint: unpa
 	var err error
 	s.grpcWorkloadListener, err = setUpUds(options.WorkloadUDSPath)
 	if err != nil {
-		sdsServiceLog.Errorf("SDS grpc server for workload proxies failed to start: %v", err)
+		sdsServiceLog.Errorf("Failed to set up UDS path: %v", err)
 	}
 
 	go func() {
