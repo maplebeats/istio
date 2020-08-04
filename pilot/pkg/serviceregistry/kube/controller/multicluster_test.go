@@ -1,6 +1,6 @@
 // +build !race
 
-// Copyright 2018 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,16 +17,16 @@
 package controller
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
-	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
 	"istio.io/istio/pilot/pkg/serviceregistry/aggregate"
+	"istio.io/istio/pkg/kube"
 	"istio.io/istio/pkg/kube/secretcontroller"
 	pkgtest "istio.io/istio/pkg/test"
 )
@@ -34,7 +34,7 @@ import (
 const (
 	testSecretName      = "testSecretName"
 	testSecretNameSpace = "istio-system"
-	WatchedNamespace    = "istio-system"
+	WatchedNamespaces   = "istio-system"
 	DomainSuffix        = "fake_domain"
 	ResyncPeriod        = 1 * time.Second
 )
@@ -56,7 +56,7 @@ func createMultiClusterSecret(k8s *fake.Clientset) error {
 
 	data["testRemoteCluster"] = []byte("Test")
 	secret.Data = data
-	_, err := k8s.CoreV1().Secrets(testSecretNameSpace).Create(&secret)
+	_, err := k8s.CoreV1().Secrets(testSecretNameSpace).Create(context.TODO(), &secret, metav1.CreateOptions{})
 	return err
 }
 
@@ -64,15 +64,8 @@ func deleteMultiClusterSecret(k8s *fake.Clientset) error {
 	var immediate int64
 
 	return k8s.CoreV1().Secrets(testSecretNameSpace).Delete(
-		testSecretName, &metav1.DeleteOptions{GracePeriodSeconds: &immediate})
-}
-
-func mockLoadKubeConfig(_ []byte) (*clientcmdapi.Config, error) {
-	return &clientcmdapi.Config{}, nil
-}
-
-func mockValidateClientConfig(_ clientcmdapi.Config) error {
-	return nil
+		context.TODO(),
+		testSecretName, metav1.DeleteOptions{GracePeriodSeconds: &immediate})
 }
 
 func verifyControllers(t *testing.T, m *Multicluster, expectedControllerCount int, timeoutName string) {
@@ -83,19 +76,20 @@ func verifyControllers(t *testing.T, m *Multicluster, expectedControllerCount in
 	})
 }
 
-func mockCreateInterfaceFromClusterConfig(_ *clientcmdapi.Config) (kubernetes.Interface, error) {
-	return fake.NewSimpleClientset(), nil
-}
-
 // This test is skipped by the build tag !race due to https://github.com/istio/istio/issues/15610
 func Test_KubeSecretController(t *testing.T) {
-	secretcontroller.LoadKubeConfig = mockLoadKubeConfig
-	secretcontroller.ValidateClientConfig = mockValidateClientConfig
-	secretcontroller.CreateInterfaceFromClusterConfig = mockCreateInterfaceFromClusterConfig
-
+	secretcontroller.BuildClientsFromConfig = func(kubeConfig []byte) (kube.Client, error) {
+		return kube.NewFakeClient(), nil
+	}
 	clientset := fake.NewSimpleClientset()
-
-	mc, err := NewMulticluster(clientset, testSecretNameSpace, WatchedNamespace, DomainSuffix, ResyncPeriod, mockserviceController, nil, nil)
+	mc, err := NewMulticluster(clientset,
+		testSecretNameSpace,
+		Options{
+			WatchedNamespaces: WatchedNamespaces,
+			DomainSuffix:      DomainSuffix,
+			ResyncPeriod:      ResyncPeriod,
+		},
+		mockserviceController, nil, nil)
 
 	if err != nil {
 		t.Fatalf("error creating Multicluster object and startign secret controller: %v", err)

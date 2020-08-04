@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -37,6 +37,9 @@ import (
 type updaterMock struct {
 	m        sync.RWMutex
 	messages diag.Messages
+
+	waitCh      chan struct{}
+	waitTimeout time.Duration
 }
 
 // Update implements StatusUpdater
@@ -44,13 +47,36 @@ func (u *updaterMock) Update(messages diag.Messages) {
 	u.m.Lock()
 	defer u.m.Unlock()
 	u.messages = messages
+
+	if u.waitCh != nil {
+		close(u.waitCh)
+		u.waitCh = nil
+	}
 }
 
 func (u *updaterMock) getMessages() diag.Messages {
-	u.m.RLock()
-	messages := u.messages
-	u.m.RUnlock()
-	return messages
+	u.m.Lock()
+	ms := u.messages
+	if ms != nil {
+		u.m.Unlock()
+		return ms
+	}
+
+	if u.waitCh == nil {
+		u.waitCh = make(chan struct{})
+	}
+	ch := u.waitCh
+	u.m.Unlock()
+
+	select {
+	case <-time.After(u.waitTimeout):
+		return nil
+	case <-ch:
+		u.m.RLock()
+		m := u.messages
+		u.m.RUnlock()
+		return m
+	}
 }
 
 type analyzerMock struct {
@@ -94,7 +120,7 @@ func (a *analyzerMock) getAnalyzeCalls() []*Snapshot {
 }
 
 func TestAnalyzeAndDistributeSnapshots(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
 	u := &updaterMock{}
 	a := &analyzerMock{
@@ -161,9 +187,9 @@ func TestAnalyzeAndDistributeSnapshots(t *testing.T) {
 }
 
 func TestAnalyzeNamespaceMessageHasNoResource(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
-	u := &updaterMock{}
+	u := &updaterMock{waitTimeout: 1 * time.Second}
 	a := &analyzerMock{
 		collectionToAccess: basicmeta.K8SCollection1.Name(),
 		resourcesToReport: []*resource.Instance{
@@ -191,9 +217,9 @@ func TestAnalyzeNamespaceMessageHasNoResource(t *testing.T) {
 }
 
 func TestAnalyzeNamespaceMessageHasOriginWithNoNamespace(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
-	u := &updaterMock{}
+	u := &updaterMock{waitTimeout: 1 * time.Second}
 	a := &analyzerMock{
 		collectionToAccess: basicmeta.K8SCollection1.Name(),
 		resourcesToReport: []*resource.Instance{
@@ -227,9 +253,9 @@ func TestAnalyzeNamespaceMessageHasOriginWithNoNamespace(t *testing.T) {
 }
 
 func TestAnalyzeSortsMessages(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
-	u := &updaterMock{}
+	u := &updaterMock{waitTimeout: 1 * time.Second}
 	r1 := &resource.Instance{
 		Origin: &rt.Origin{
 			Collection: basicmeta.K8SCollection1.Name(),
@@ -263,7 +289,6 @@ func TestAnalyzeSortsMessages(t *testing.T) {
 	sDefault := getTestSnapshot()
 
 	ad.Distribute(snapshots.Default, sDefault)
-	time.Sleep(1 * time.Second)
 
 	g.Eventually(a.getAnalyzeCalls).Should(ConsistOf(sDefault))
 
@@ -273,9 +298,9 @@ func TestAnalyzeSortsMessages(t *testing.T) {
 }
 
 func TestAnalyzeSuppressesMessages(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
-	u := &updaterMock{}
+	u := &updaterMock{waitTimeout: 1 * time.Second}
 	r1 := &resource.Instance{
 		Origin: &rt.Origin{
 			Collection: basicmeta.K8SCollection1.Name(),
@@ -316,7 +341,6 @@ func TestAnalyzeSuppressesMessages(t *testing.T) {
 	sDefault := getTestSnapshot()
 
 	ad.Distribute(snapshots.Default, sDefault)
-	time.Sleep(1 * time.Second)
 
 	g.Eventually(a.getAnalyzeCalls).Should(ConsistOf(sDefault))
 
@@ -325,9 +349,9 @@ func TestAnalyzeSuppressesMessages(t *testing.T) {
 }
 
 func TestAnalyzeSuppressesMessagesWithWildcards(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
-	u := &updaterMock{}
+	u := &updaterMock{waitTimeout: 1 * time.Second}
 	// r1 and r2 have the same prefix, but r3 does not
 	r1 := &resource.Instance{
 		Origin: &rt.Origin{
@@ -375,7 +399,6 @@ func TestAnalyzeSuppressesMessagesWithWildcards(t *testing.T) {
 	sDefault := getTestSnapshot()
 
 	ad.Distribute(snapshots.Default, sDefault)
-	time.Sleep(1 * time.Second)
 
 	g.Eventually(a.getAnalyzeCalls).Should(ConsistOf(sDefault))
 
@@ -429,8 +452,8 @@ func TestAnalyzeSuppressesMessagesWhenResourceIsAnnotated(t *testing.T) {
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			g := NewGomegaWithT(t)
-			u := &updaterMock{}
+			g := NewWithT(t)
+			u := &updaterMock{waitTimeout: 1 * time.Second}
 			r := &resource.Instance{
 				Metadata: resource.Metadata{
 					Annotations: tc.annotations,
@@ -495,11 +518,22 @@ func newSchema(name string) collection.Schema {
 }
 
 var _ resource.Origin = fakeOrigin{}
+var _ resource.Reference = fakeReference{}
 
 type fakeOrigin struct {
 	namespace    resource.Namespace
 	friendlyName string
+	reference    fakeReference
 }
 
 func (f fakeOrigin) Namespace() resource.Namespace { return f.namespace }
 func (f fakeOrigin) FriendlyName() string          { return f.friendlyName }
+func (f fakeOrigin) Reference() resource.Reference { return f.reference }
+
+type fakeReference struct {
+	name string
+}
+
+func (r fakeReference) String() string {
+	return r.name
+}

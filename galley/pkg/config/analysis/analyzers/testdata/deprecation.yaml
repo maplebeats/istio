@@ -12,29 +12,46 @@ spec:
    - listenerMatch:
        portNumber: 15443
 ---
-apiVersion: "rbac.istio.io/v1alpha1"
-kind: ServiceRoleBinding
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
 metadata:
-  name: bind-mongodb-viewer
+  name: productpage
+  namespace: foo
+spec:
+  hosts:
+  - productpage
+  http:
+  - fault:
+      delay:
+        percent: 50
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: Sidecar
+metadata:
+  name: no-selector
   namespace: default
 spec:
-  subjects:
-  - user: "cluster.local/ns/default/sa/bookinfo-ratings-v2"
-    # group is deprecated
-    group: "beatles"
-  roleRef:
-    kind: ServiceRole
-    name: "mongodb-viewer"
+  ingress:
+  - port:
+      number: 9080
+    defaultEndpoint: unix:///var/run/some.sock
+  egress:
+  - hosts:
+    - "./*"
+  outboundTrafficPolicy:
+    mode: ALLOW_ANY
+    egressProxy:
+      host: example
+      port:
+        number: 9080
 ---
-apiVersion: "authentication.istio.io/v1alpha1"
-kind: Policy
+apiVersion: config.istio.io/v1alpha2
+kind: QuotaSpec
 metadata:
-  name: policy-with-jwt
-  namespace: deprecation-policy
+  name: request-count
+  namespace: istio-system
 spec:
-  targets:
-  - name: productpage
-  origins:
-  - jwt:
-      issuer: "testing@secure.istio.io"
-      jwksUri: "https://raw.githubusercontent.com/istio/istio/release-1.4/security/tools/jwt/samples/jwks.json"
+  rules:
+  - quotas:
+    - charge: 1
+      quota: requestcount

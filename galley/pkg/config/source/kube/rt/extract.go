@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,7 +25,7 @@ import (
 )
 
 // ToResource converts the given object and proto to a resource.Instance
-func ToResource(object metav1.Object, schema collection.Schema, item proto.Message) *resource.Instance {
+func ToResource(object metav1.Object, schema collection.Schema, item proto.Message, source resource.Reference) *resource.Instance {
 	var o *Origin
 
 	name := resource.NewFullName(resource.Namespace(object.GetNamespace()), resource.LocalName(object.GetName()))
@@ -39,6 +39,7 @@ func ToResource(object metav1.Object, schema collection.Schema, item proto.Messa
 			Collection: schema.Name(),
 			Kind:       schema.Resource().Kind(),
 			Version:    version,
+			Ref:        source,
 		}
 	}
 

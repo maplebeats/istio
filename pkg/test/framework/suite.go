@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,16 +18,22 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"os"
+	"path"
+	"path/filepath"
+	"regexp"
+	goruntime "runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"istio.io/istio/pkg/test/framework/components/environment"
-	"istio.io/istio/pkg/test/framework/components/environment/api"
+	"gopkg.in/yaml.v2"
+
+	"istio.io/pkg/log"
+
 	"istio.io/istio/pkg/test/framework/components/environment/kube"
-	"istio.io/istio/pkg/test/framework/components/environment/native"
-	"istio.io/istio/pkg/test/framework/core"
 	ferrors "istio.io/istio/pkg/test/framework/errors"
 	"istio.io/istio/pkg/test/framework/label"
 	"istio.io/istio/pkg/test/framework/resource"
@@ -46,110 +52,201 @@ const (
 var (
 	rt   *runtime
 	rtMu sync.Mutex
+
+	// Well-known paths which are stripped when generating test IDs.
+	// Note: Order matters! Always specify the most specific directory first.
+	wellKnownPaths = mustCompileAll(
+		// This allows us to trim test IDs on the istio.io/istio.io repo.
+		".*/istio.io/istio.io/",
+
+		// These allow us to trim test IDs on istio.io/istio repo.
+		".*/istio.io/istio/tests/integration/",
+		".*/istio.io/istio/",
+
+		// These are also used for istio.io/istio, but make help to satisfy
+		// the feature label enforcement when running with BUILD_WITH_CONTAINER=1.
+		"^/work/tests/integration/",
+		"^/work/")
 )
 
+// getSettingsFunc is a function used to extract the default settings for the Suite.
+type getSettingsFunc func(string) (*resource.Settings, error)
+
 // mRunFn abstracts testing.M.run, so that the framework itself can be tested.
-type mRunFn func() int
+type mRunFn func(ctx *suiteContext) int
 
 // Suite allows the test author to specify suite-related metadata and do setup in a fluent-style, before commencing execution.
-type Suite struct {
-	testID string
-	skip   string
-	mRun   mRunFn
-	osExit func(int)
-	labels label.Set
+type Suite interface {
+	// EnvironmentFactory sets a custom function used for creating the resource.Environment for this Suite.
+	EnvironmentFactory(fn resource.EnvironmentFactory) Suite
+	// Label all the tests in suite with the given labels
+	Label(labels ...label.Instance) Suite
+	// Skip marks a suite as skipped with the given reason. This will prevent any setup functions from occurring.
+	Skip(reason string) Suite
+	// RequireMinClusters ensures that the current environment contains at least the given number of clusters.
+	// Otherwise it stops test execution.
+	RequireMinClusters(minClusters int) Suite
+	// RequireMaxClusters ensures that the current environment contains at least the given number of clusters.
+	// Otherwise it stops test execution.
+	RequireMaxClusters(maxClusters int) Suite
+	// RequireSingleCluster is a utility method that requires that there be exactly 1 cluster in the environment.
+	RequireSingleCluster() Suite
+	// RequireEnvironmentVersion validates the environment meets a minimum version
+	RequireEnvironmentVersion(version string) Suite
+	// Setup runs enqueues the given setup function to run before test execution.
+	Setup(fn resource.SetupFn) Suite
+	// Run the suite. This method calls os.Exit and does not return.
+	Run()
+}
 
-	setupFns []resource.SetupFn
+// suiteImpl will actually run the test suite
+type suiteImpl struct {
+	testID      string
+	skipMessage string
+	mRun        mRunFn
+	osExit      func(int)
+	labels      label.Set
 
-	getSettingsFn func(string) (*core.Settings, error)
+	requireFns []resource.SetupFn
+	setupFns   []resource.SetupFn
+
+	getSettings getSettingsFunc
+	envFactory  resource.EnvironmentFactory
+}
+
+// Given the filename of a test, derive its suite name
+func deriveSuiteName(caller string) string {
+	d := filepath.Dir(caller)
+	// We will trim out paths preceding some well known paths. This should handle anything in istio or docs repo,
+	// as well as special case tests/integration. The end result is a test under ./tests/integration/pilot/ingress
+	// will become pilot_ingress
+	// Note: if this fails to trim, we end up with "ugly" suite names but otherwise no real impact.
+	for _, wellKnownPath := range wellKnownPaths {
+		// Try removing this path from the directory name.
+		result := wellKnownPath.ReplaceAllString(d, "")
+		if len(result) < len(d) {
+			// Successfully found and removed this path from the directory.
+			d = result
+			break
+		}
+	}
+	return strings.ReplaceAll(d, "/", "_")
 }
 
 // NewSuite returns a new suite instance.
-func NewSuite(testID string, m *testing.M) *Suite {
-	return newSuite(testID, m.Run, os.Exit, getSettings)
+func NewSuite(m *testing.M) Suite {
+	_, f, _, _ := goruntime.Caller(1)
+	suiteName := deriveSuiteName(f)
+
+	if analyze() {
+		return newSuiteAnalyzer(
+			suiteName,
+			func(_ *suiteContext) int {
+				return m.Run()
+			},
+			os.Exit)
+	}
+
+	return newSuite(suiteName,
+		func(_ *suiteContext) int {
+			return m.Run()
+		},
+		os.Exit,
+		getSettings)
 }
 
-func newSuite(testID string, fn mRunFn, osExit func(int), getSettingsFn func(string) (*core.Settings, error)) *Suite {
-	s := &Suite{
-		testID:        testID,
-		mRun:          fn,
-		osExit:        osExit,
-		getSettingsFn: getSettingsFn,
-		labels:        label.NewSet(),
+func newSuite(testID string, fn mRunFn, osExit func(int), getSettingsFn getSettingsFunc) *suiteImpl {
+	s := &suiteImpl{
+		testID:      testID,
+		mRun:        fn,
+		osExit:      osExit,
+		getSettings: getSettingsFn,
+		labels:      label.NewSet(),
 	}
 
 	return s
 }
 
-// Label all the tests in suite with the given labels
-func (s *Suite) Label(labels ...label.Instance) *Suite {
+func (s *suiteImpl) EnvironmentFactory(fn resource.EnvironmentFactory) Suite {
+	if fn != nil && s.envFactory != nil {
+		scopes.Framework.Warn("EnvironmentFactory overridden multiple times for Suite")
+	}
+	s.envFactory = fn
+	return s
+}
+
+func (s *suiteImpl) Label(labels ...label.Instance) Suite {
 	s.labels = s.labels.Add(labels...)
 	return s
 }
 
-// Skip marks a suite as skipped with the given reason. This will prevent any setup functions from occurring.
-func (s *Suite) Skip(reason string) *Suite {
-	s.skip = reason
+func (s *suiteImpl) Skip(reason string) Suite {
+	s.skipMessage = reason
 	return s
 }
 
-// RequireEnvironment ensures that the current environment matches what the suite expects. Otherwise it
-// stops test execution. This also applies the appropriate label to the suite implicitly.
-func (s *Suite) RequireEnvironment(name environment.Name) *Suite {
-	setupFn := func(ctx resource.Context) error {
-		if name != ctx.Environment().EnvironmentName() {
-			scopes.Framework.Infof("Skipping suite %q: Required environment (%v) does not match current: %v",
-				ctx.Settings().TestID, name, ctx.Environment().EnvironmentName())
-			s.osExit(0)
+func (s *suiteImpl) RequireMinClusters(minClusters int) Suite {
+	if minClusters <= 0 {
+		minClusters = 1
+	}
 
-			// Adding this for testing purposes.
-			return fmt.Errorf("failed setup: Required environment not found")
+	fn := func(ctx resource.Context) error {
+		if len(clusters(ctx)) < minClusters {
+			s.Skip(fmt.Sprintf("Number of clusters %d does not exceed minimum %d",
+				len(clusters(ctx)), minClusters))
 		}
 		return nil
 	}
 
-	// Prepend the function, so that it runs as the first thing.
-	fns := []resource.SetupFn{setupFn}
-	fns = append(fns, s.setupFns...)
-	s.setupFns = fns
+	s.requireFns = append(s.requireFns, fn)
 	return s
 }
 
-// RequireEnvironmentVersion validates the environment meets a minimum version
-func (s *Suite) RequireEnvironmentVersion(version string) *Suite {
-	setupFn := func(ctx resource.Context) error {
+func (s *suiteImpl) RequireMaxClusters(maxClusters int) Suite {
+	if maxClusters <= 0 {
+		maxClusters = 1
+	}
 
-		if ctx.Environment().EnvironmentName() == environment.Kube {
-			kenv := ctx.Environment().(*kube.Environment)
-			ver, err := kenv.GetKubernetesVersion()
-			if err != nil {
-				return fmt.Errorf("failed to get Kubernetes version: %v", err)
-			}
-			serverVersion := fmt.Sprintf("%s.%s", ver.Major, ver.Minor)
-			if serverVersion < version {
-				scopes.Framework.Infof("Skipping suite %q: Required Kubernetes version (%v) is greater than current: %v",
-					ctx.Settings().TestID, version, serverVersion)
-				s.osExit(0)
-
-			}
+	fn := func(ctx resource.Context) error {
+		if len(clusters(ctx)) > maxClusters {
+			s.Skip(fmt.Sprintf("Number of clusters %d exceeds maximum %d",
+				len(clusters(ctx)), maxClusters))
 		}
 		return nil
 	}
 
-	// Prepend the function, so that it runs as the first thing.
-	fns := []resource.SetupFn{setupFn}
-	fns = append(fns, s.setupFns...)
-	s.setupFns = fns
+	s.requireFns = append(s.requireFns, fn)
 	return s
 }
 
-// Setup runs enqueues the given setup function to run before test execution.
-func (s *Suite) Setup(fn resource.SetupFn) *Suite {
+func (s *suiteImpl) RequireSingleCluster() Suite {
+	return s.RequireMinClusters(1).RequireMaxClusters(1)
+}
+
+func (s *suiteImpl) RequireEnvironmentVersion(version string) Suite {
+	fn := func(ctx resource.Context) error {
+		ver, err := ctx.Clusters()[0].GetKubernetesVersion()
+		if err != nil {
+			return fmt.Errorf("failed to get Kubernetes version: %v", err)
+		}
+		serverVersion := fmt.Sprintf("%s.%s", ver.Major, ver.Minor)
+		if serverVersion < version {
+			s.Skip(fmt.Sprintf("Required Kubernetes version (%v) is greater than current: %v",
+				version, serverVersion))
+		}
+		return nil
+	}
+
+	s.requireFns = append(s.requireFns, fn)
+	return s
+}
+
+func (s *suiteImpl) Setup(fn resource.SetupFn) Suite {
 	s.setupFns = append(s.setupFns, fn)
 	return s
 }
 
-func (s *Suite) runSetupFn(fn resource.SetupFn, ctx SuiteContext) (err error) {
+func (s *suiteImpl) runSetupFn(fn resource.SetupFn, ctx SuiteContext) (err error) {
 	defer func() {
 		// Dump if the setup function fails
 		if err != nil && ctx.Settings().CIMode {
@@ -160,25 +257,30 @@ func (s *Suite) runSetupFn(fn resource.SetupFn, ctx SuiteContext) (err error) {
 	return
 }
 
-// SetupOnEnv runs the given setup function conditionally, based on the current environment.
-func (s *Suite) SetupOnEnv(e environment.Name, fn resource.SetupFn) *Suite {
-	s.Setup(func(ctx resource.Context) error {
-		if ctx.Environment().EnvironmentName() != e {
-			return nil
-		}
-		return fn(ctx)
-	})
-
-	return s
-}
-
-// Run the suite. This method calls os.Exit and does not return.
-func (s *Suite) Run() {
+func (s *suiteImpl) Run() {
 	s.osExit(s.run())
 }
 
-func (s *Suite) run() (errLevel int) {
-	if err := initRuntime(s.testID, s.labels, s.getSettingsFn); err != nil {
+func (s *suiteImpl) isSkipped() bool {
+	return s.skipMessage != ""
+}
+
+func (s *suiteImpl) doSkip(ctx *suiteContext) int {
+	scopes.Framework.Infof("Skipping suite %q: %s", ctx.Settings().TestID, s.skipMessage)
+
+	// Mark this suite as skipped in the context.
+	ctx.skipped = true
+
+	// Run the tests so that the golang test framework exits normally. The tests will not run because
+	// they see that this suite has been skipped.
+	_ = s.mRun(ctx)
+
+	// Return success.
+	return 0
+}
+
+func (s *suiteImpl) run() (errLevel int) {
+	if err := initRuntime(s); err != nil {
 		scopes.Framework.Errorf("Error during test framework init: %v", err)
 		return exitCodeInitError
 	}
@@ -186,19 +288,17 @@ func (s *Suite) run() (errLevel int) {
 	ctx := rt.suiteContext()
 
 	// Skip the test if its explicitly skipped
-	if s.skip != "" {
-		scopes.Framework.Infof("Skipping suite %q: %s", ctx.Settings().TestID, s.skip)
-		return 0
+	if s.isSkipped() {
+		return s.doSkip(ctx)
 	}
 
 	// Before starting, check whether the current set of labels & label selectors will ever allow us to run tests.
 	// if not, simply exit now.
 	if ctx.Settings().Selector.Excludes(s.labels) {
-		scopes.Framework.Infof("Skipping suite %q due to label mismatch: labels=%v, selector=%v",
-			ctx.Settings().TestID,
+		s.Skip(fmt.Sprintf("Label mismatch: labels=%v, selector=%v",
 			s.labels,
-			ctx.Settings().Selector)
-		return 0
+			ctx.Settings().Selector))
+		return s.doSkip(ctx)
 	}
 
 	start := time.Now()
@@ -224,47 +324,114 @@ func (s *Suite) run() (errLevel int) {
 		return exitCodeSetupError
 	}
 
+	// Check if one of the setup functions ended up skipping the suite.
+	if s.isSkipped() {
+		return s.doSkip(ctx)
+	}
+
 	defer func() {
 		end := time.Now()
-		scopes.CI.Infof("=== Suite %q run time: %v ===", ctx.Settings().TestID, end.Sub(start))
+		scopes.Framework.Infof("=== Suite %q run time: %v ===", ctx.Settings().TestID, end.Sub(start))
 	}()
 
 	attempt := 0
 	for attempt <= ctx.settings.Retries {
 		attempt++
-		scopes.CI.Infof("=== BEGIN: Test Run: '%s' ===", ctx.Settings().TestID)
-		errLevel = s.mRun()
+		scopes.Framework.Infof("=== BEGIN: Test Run: '%s' ===", ctx.Settings().TestID)
+		errLevel = s.mRun(ctx)
 		if errLevel == 0 {
-			scopes.CI.Infof("=== DONE: Test Run: '%s' ===", ctx.Settings().TestID)
+			scopes.Framework.Infof("=== DONE: Test Run: '%s' ===", ctx.Settings().TestID)
 			break
 		} else {
-			scopes.CI.Infof("=== FAILED: Test Run: '%s' (exitCode: %v) ===",
+			scopes.Framework.Infof("=== FAILED: Test Run: '%s' (exitCode: %v) ===",
 				ctx.Settings().TestID, errLevel)
 			if attempt <= ctx.settings.Retries {
-				scopes.CI.Warnf("=== RETRY: Test Run: '%s' ===", ctx.Settings().TestID)
+				scopes.Framework.Warnf("=== RETRY: Test Run: '%s' ===", ctx.Settings().TestID)
 			}
 		}
 	}
+	s.writeOutput()
 
 	return
 }
 
-func (s *Suite) runSetupFns(ctx SuiteContext) (err error) {
-	scopes.CI.Infof("=== BEGIN: Setup: '%s' ===", ctx.Settings().TestID)
+type SuiteOutcome struct {
+	Name         string
+	Environment  string
+	Multicluster bool
+	TestOutcomes []TestOutcome
+}
 
-	for _, fn := range s.setupFns {
-		err := s.runSetupFn(fn, ctx)
-		if err != nil {
-			scopes.Framework.Errorf("Test setup error: %v", err)
-			scopes.CI.Infof("=== FAILED: Setup: '%s' (%v) ===", ctx.Settings().TestID, err)
-			return err
-		}
+func environmentName(ctx resource.Context) string {
+	if ctx.Environment() != nil {
+		return ctx.Environment().EnvironmentName()
 	}
-	scopes.CI.Infof("=== DONE: Setup: '%s' ===", ctx.Settings().TestID)
+	return ""
+}
+
+func isMulticluster(ctx resource.Context) bool {
+	if ctx.Environment() != nil {
+		return ctx.Clusters().IsMulticluster()
+	}
+	return false
+}
+
+func clusters(ctx resource.Context) []resource.Cluster {
+	if ctx.Environment() != nil {
+		return ctx.Environment().Clusters()
+	}
 	return nil
 }
 
-func initRuntime(testID string, labels label.Set, getSettingsFn func(string) (*core.Settings, error)) error {
+func (s *suiteImpl) writeOutput() {
+	// the ARTIFACTS env var is set by prow, and uploaded to GCS as part of the job artifact
+	artifactsPath := os.Getenv("ARTIFACTS")
+	if artifactsPath != "" {
+		ctx := rt.suiteContext()
+		ctx.outcomeMu.RLock()
+		out := SuiteOutcome{
+			Name:         ctx.Settings().TestID,
+			Environment:  environmentName(ctx),
+			Multicluster: isMulticluster(ctx),
+			TestOutcomes: ctx.testOutcomes,
+		}
+		ctx.outcomeMu.RUnlock()
+		outbytes, err := yaml.Marshal(out)
+		if err != nil {
+			log.Errorf("failed writing test suite outcome to yaml: %s", err)
+		}
+		err = ioutil.WriteFile(path.Join(artifactsPath, out.Name+".yaml"), outbytes, 0644)
+		if err != nil {
+			log.Errorf("failed writing test suite outcome to file: %s", err)
+		}
+	}
+}
+
+func (s *suiteImpl) runSetupFns(ctx SuiteContext) (err error) {
+	scopes.Framework.Infof("=== BEGIN: Setup: '%s' ===", ctx.Settings().TestID)
+
+	// Run all the require functions first, then the setup functions.
+	setupFns := append(append([]resource.SetupFn{}, s.requireFns...), s.setupFns...)
+
+	start := time.Now()
+	for _, fn := range setupFns {
+		err := s.runSetupFn(fn, ctx)
+		if err != nil {
+			scopes.Framework.Errorf("Test setup error: %v", err)
+			scopes.Framework.Infof("=== FAILED: Setup: '%s' (%v) ===", ctx.Settings().TestID, err)
+			return err
+		}
+
+		if s.isSkipped() {
+			return nil
+		}
+	}
+	elapsed := time.Since(start)
+	scopes.Framework.Infof("=== DONE: Setup: '%s' (%v) ===", ctx.Settings().TestID, elapsed)
+	return nil
+}
+
+func initRuntime(s *suiteImpl) error {
 	rtMu.Lock()
 	defer rtMu.Unlock()
 
@@ -272,45 +439,63 @@ func initRuntime(testID string, labels label.Set, getSettingsFn func(string) (*c
 		return errors.New("framework is already initialized")
 	}
 
-	s, err := getSettingsFn(testID)
+	settings, err := s.getSettings(s.testID)
 	if err != nil {
 		return err
 	}
 
-	if err := configureLogging(s.CIMode); err != nil {
+	// Get the EnvironmentFactory.
+	environmentFactory := s.envFactory
+	if environmentFactory == nil {
+		environmentFactory = settings.EnvironmentFactory
+	}
+	if environmentFactory == nil {
+		environmentFactory = newEnvironment
+	}
+
+	if err := configureLogging(); err != nil {
 		return err
 	}
 
-	scopes.CI.Infof("=== Test Framework Settings ===")
-	scopes.CI.Info(s.String())
-	scopes.CI.Infof("===============================")
+	scopes.Framework.Infof("=== Test Framework Settings ===")
+	scopes.Framework.Info(settings.String())
+	scopes.Framework.Infof("===============================")
 
 	// Ensure that the work dir is set.
-	if err := os.MkdirAll(s.RunDir(), os.ModePerm); err != nil {
-		return fmt.Errorf("error creating rundir %q: %v", s.RunDir(), err)
+	if err := os.MkdirAll(settings.RunDir(), os.ModePerm); err != nil {
+		return fmt.Errorf("error creating rundir %q: %v", settings.RunDir(), err)
 	}
-	scopes.Framework.Infof("Test run dir: %v", s.RunDir())
+	scopes.Framework.Infof("Test run dir: %v", settings.RunDir())
 
-	rt, err = newRuntime(s, newEnvironment, labels)
+	rt, err = newRuntime(settings, environmentFactory, s.labels)
 	return err
 }
 
-func newEnvironment(name string, ctx api.Context) (resource.Environment, error) {
-	switch name {
-	case environment.Native.String():
-		return native.New(ctx)
-	case environment.Kube.String():
-		return kube.New(ctx)
-	default:
-		return nil, fmt.Errorf("unknown environment: %q", name)
+func newEnvironment(ctx resource.Context) (resource.Environment, error) {
+	s, err := kube.NewSettingsFromCommandLine()
+	if err != nil {
+		return nil, err
 	}
+	if s.Minikube {
+		return nil, fmt.Errorf("istio.test.kube.minikube is deprecated; set --istio.test.kube.loadbalancer=false instead")
+	}
+	return kube.New(ctx, s)
 }
 
-func getSettings(testID string) (*core.Settings, error) {
+func getSettings(testID string) (*resource.Settings, error) {
 	// Parse flags and init logging.
 	if !flag.Parsed() {
 		flag.Parse()
 	}
 
-	return core.SettingsFromCommandLine(testID)
+	return resource.SettingsFromCommandLine(testID)
+}
+
+func mustCompileAll(patterns ...string) []*regexp.Regexp {
+	out := make([]*regexp.Regexp, 0, len(patterns))
+	for _, pattern := range patterns {
+		out = append(out, regexp.MustCompile(pattern))
+	}
+
+	return out
 }

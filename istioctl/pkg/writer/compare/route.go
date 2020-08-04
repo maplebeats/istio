@@ -1,4 +1,4 @@
-// Copyright 2018 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,25 +23,25 @@ import (
 	"github.com/pmezard/go-difflib/difflib"
 )
 
-// RouteDiff prints a diff between Pilot and Envoy routes to the passed writer
+// RouteDiff prints a diff between Istiod and Envoy routes to the passed writer
 func (c *Comparator) RouteDiff() error {
 	jsonm := &jsonpb.Marshaler{Indent: "   "}
-	envoyBytes, pilotBytes := &bytes.Buffer{}, &bytes.Buffer{}
+	envoyBytes, istiodBytes := &bytes.Buffer{}, &bytes.Buffer{}
 	envoyRouteDump, err := c.envoy.GetDynamicRouteDump(true)
 	if err != nil {
 		envoyBytes.WriteString(err.Error())
 	} else if err := jsonm.Marshal(envoyBytes, envoyRouteDump); err != nil {
 		return err
 	}
-	pilotRouteDump, err := c.pilot.GetDynamicRouteDump(true)
+	istiodRouteDump, err := c.istiod.GetDynamicRouteDump(true)
 	if err != nil {
-		pilotBytes.WriteString(err.Error())
-	} else if err := jsonm.Marshal(pilotBytes, pilotRouteDump); err != nil {
+		istiodBytes.WriteString(err.Error())
+	} else if err := jsonm.Marshal(istiodBytes, istiodRouteDump); err != nil {
 		return err
 	}
 	diff := difflib.UnifiedDiff{
-		FromFile: "Pilot Routes",
-		A:        difflib.SplitLines(pilotBytes.String()),
+		FromFile: "Istiod Routes",
+		A:        difflib.SplitLines(istiodBytes.String()),
 		ToFile:   "Envoy Routes",
 		B:        difflib.SplitLines(envoyBytes.String()),
 		Context:  c.context,
@@ -61,10 +61,10 @@ func (c *Comparator) RouteDiff() error {
 		lastUpdatedStr = fmt.Sprintf(" (RDS last loaded at %s)", lastUpdated.In(loc).Format(time.RFC1123))
 	}
 	if text != "" {
-		fmt.Fprintln(c.w, fmt.Sprintf("Routes Don't Match%s", lastUpdatedStr))
+		fmt.Fprintf(c.w, "Routes Don't Match%s\n", lastUpdatedStr)
 		fmt.Fprintln(c.w, text)
 	} else {
-		fmt.Fprintln(c.w, fmt.Sprintf("Routes Match%s", lastUpdatedStr))
+		fmt.Fprintf(c.w, "Routes Match%s\n", lastUpdatedStr)
 	}
 	return nil
 }

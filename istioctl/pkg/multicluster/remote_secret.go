@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors.
+// Copyright Istio Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,9 +16,9 @@ package multicluster
 
 import (
 	"bytes"
+	context2 "context"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -46,7 +46,11 @@ var (
 func init() {
 	scheme = runtime.NewScheme()
 	utilruntime.Must(v1.AddToScheme(scheme))
-	opt := json.SerializerOptions{true, false, false}
+	opt := json.SerializerOptions{
+		Yaml:   true,
+		Pretty: false,
+		Strict: false,
+	}
 	yamlSerializer := json.NewSerializerWithOptions(json.DefaultMetaFactory, scheme, scheme, opt)
 	codec = versioning.NewDefaultingCodecForScheme(
 		scheme,
@@ -86,15 +90,15 @@ func NewCreateRemoteSecretCommand() *cobra.Command {
 		Example: `
 # Create a secret to access cluster c0's apiserver and install it in cluster c1.
 istioctl --Kubeconfig=c0.yaml x create-remote-secret --name c0 \
-    | kubectl -n istio-system --Kubeconfig=c1.yaml apply -f -
+    | kubectl --Kubeconfig=c1.yaml apply -f -
 
 # Delete a secret that was previously installed in c1
 istioctl --Kubeconfig=c0.yaml x create-remote-secret --name c0 \
-    | kubectl -n istio-system --Kubeconfig=c1.yaml delete -f -
+    | kubectl --Kubeconfig=c1.yaml delete -f -
 
 # Create a secret access a remote cluster with an auth plugin
 istioctl --Kubeconfig=c0.yaml x create-remote-secret --name c0 --auth-type=plugin --auth-plugin-name=gcp \
-    | kubectl -n istio-system --Kubeconfig=c1.yaml apply -f -
+    | kubectl --Kubeconfig=c1.yaml apply -f -
 `,
 		Args: cobra.NoArgs,
 		RunE: func(c *cobra.Command, args []string) error {
@@ -107,10 +111,10 @@ istioctl --Kubeconfig=c0.yaml x create-remote-secret --name c0 --auth-type=plugi
 			}
 			out, err := CreateRemoteSecret(opts, env)
 			if err != nil {
-				fmt.Fprintf(c.OutOrStderr(), "error: %v\n", err)
-				os.Exit(1)
+				_, _ = fmt.Fprintf(c.OutOrStderr(), "error: %v\n", err)
+				return err
 			}
-			fmt.Fprint(c.OutOrStdout(), out)
+			_, _ = fmt.Fprint(c.OutOrStdout(), out)
 			return nil
 		},
 	}
@@ -118,7 +122,7 @@ istioctl --Kubeconfig=c0.yaml x create-remote-secret --name c0 --auth-type=plugi
 	return c
 }
 
-func createRemoteServiceAccountSecret(kubeconfig *api.Config, clusterName, context string) (*v1.Secret, error) { // nolint:interfacer
+func createRemoteServiceAccountSecret(kubeconfig *api.Config, clusterName string) (*v1.Secret, error) { // nolint:interfacer
 	var data bytes.Buffer
 	if err := latest.Codec.Encode(kubeconfig, &data); err != nil {
 		return nil, err
@@ -127,7 +131,7 @@ func createRemoteServiceAccountSecret(kubeconfig *api.Config, clusterName, conte
 		ObjectMeta: metav1.ObjectMeta{
 			Name: remoteSecretNameFromClusterName(clusterName),
 			Annotations: map[string]string{
-				clusterContextAnnotationKey: context,
+				clusterNameAnnotationKey: clusterName,
 			},
 			Labels: map[string]string{
 				secretcontroller.MultiClusterSecretLabel: "true",
@@ -140,36 +144,36 @@ func createRemoteServiceAccountSecret(kubeconfig *api.Config, clusterName, conte
 	return out, nil
 }
 
-func createBaseKubeconfig(caData []byte, context, server string) *api.Config {
+func createBaseKubeconfig(caData []byte, clusterName, server string) *api.Config {
 	return &api.Config{
 		Clusters: map[string]*api.Cluster{
-			context: {
+			clusterName: {
 				CertificateAuthorityData: caData,
 				Server:                   server,
 			},
 		},
 		AuthInfos: map[string]*api.AuthInfo{},
 		Contexts: map[string]*api.Context{
-			context: {
-				Cluster:  context,
-				AuthInfo: context,
+			clusterName: {
+				Cluster:  clusterName,
+				AuthInfo: clusterName,
 			},
 		},
-		CurrentContext: context,
+		CurrentContext: clusterName,
 	}
 }
 
-func createBearerTokenKubeconfig(caData, token []byte, context, server string) *api.Config {
-	c := createBaseKubeconfig(caData, context, server)
-	c.AuthInfos[context] = &api.AuthInfo{
+func createBearerTokenKubeconfig(caData, token []byte, clusterName, server string) *api.Config {
+	c := createBaseKubeconfig(caData, clusterName, server)
+	c.AuthInfos[c.CurrentContext] = &api.AuthInfo{
 		Token: string(token),
 	}
 	return c
 }
 
-func createPluginKubeconfig(caData []byte, context, server string, authProviderConfig *api.AuthProviderConfig) *api.Config {
-	c := createBaseKubeconfig(caData, context, server)
-	c.AuthInfos[context] = &api.AuthInfo{
+func createPluginKubeconfig(caData []byte, clusterName, server string, authProviderConfig *api.AuthProviderConfig) *api.Config {
+	c := createBaseKubeconfig(caData, clusterName, server)
+	c.AuthInfos[c.CurrentContext] = &api.AuthInfo{
 		AuthProvider: authProviderConfig,
 	}
 	return c
@@ -177,7 +181,7 @@ func createPluginKubeconfig(caData []byte, context, server string, authProviderC
 
 func createRemoteSecretFromPlugin(
 	tokenSecret *v1.Secret,
-	context, server, clusterName string,
+	server, clusterName string,
 	authProviderConfig *api.AuthProviderConfig,
 ) (*v1.Secret, error) {
 	caData, ok := tokenSecret.Data[v1.ServiceAccountRootCAKey]
@@ -186,10 +190,10 @@ func createRemoteSecretFromPlugin(
 	}
 
 	// Create a Kubeconfig to access the remote cluster using the auth provider plugin.
-	kubeconfig := createPluginKubeconfig(caData, context, server, authProviderConfig)
+	kubeconfig := createPluginKubeconfig(caData, clusterName, server, authProviderConfig)
 
 	// Encode the Kubeconfig in a secret that can be loaded by Istio to dynamically discover and access the remote cluster.
-	return createRemoteServiceAccountSecret(kubeconfig, clusterName, context)
+	return createRemoteServiceAccountSecret(kubeconfig, clusterName)
 }
 
 var (
@@ -197,7 +201,7 @@ var (
 	errMissingTokenKey  = fmt.Errorf("no %q data found", v1.ServiceAccountTokenKey)
 )
 
-func createRemoteSecretFromTokenAndServer(tokenSecret *v1.Secret, clusterName, context, server string) (*v1.Secret, error) {
+func createRemoteSecretFromTokenAndServer(tokenSecret *v1.Secret, clusterName, server string) (*v1.Secret, error) {
 	caData, ok := tokenSecret.Data[v1.ServiceAccountRootCAKey]
 	if !ok {
 		return nil, errMissingRootCAKey
@@ -208,14 +212,14 @@ func createRemoteSecretFromTokenAndServer(tokenSecret *v1.Secret, clusterName, c
 	}
 
 	// Create a Kubeconfig to access the remote cluster using the remote service account credentials.
-	kubeconfig := createBearerTokenKubeconfig(caData, token, context, server)
+	kubeconfig := createBearerTokenKubeconfig(caData, token, clusterName, server)
 
 	// Encode the Kubeconfig in a secret that can be loaded by Istio to dynamically discover and access the remote cluster.
-	return createRemoteServiceAccountSecret(kubeconfig, clusterName, context)
+	return createRemoteServiceAccountSecret(kubeconfig, clusterName)
 }
 
 func getServiceAccountSecretToken(kube kubernetes.Interface, saName, saNamespace string) (*v1.Secret, error) {
-	serviceAccount, err := kube.CoreV1().ServiceAccounts(saNamespace).Get(saName, metav1.GetOptions{})
+	serviceAccount, err := kube.CoreV1().ServiceAccounts(saNamespace).Get(context2.TODO(), saName, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -228,23 +232,23 @@ func getServiceAccountSecretToken(kube kubernetes.Interface, saName, saNamespace
 	if secretNamespace == "" {
 		secretNamespace = saNamespace
 	}
-	return kube.CoreV1().Secrets(secretNamespace).Get(secretName, metav1.GetOptions{})
+	return kube.CoreV1().Secrets(secretNamespace).Get(context2.TODO(), secretName, metav1.GetOptions{})
 }
 
-func getCurrentContextAndClusterServerFromKubeconfig(context string, config *api.Config) (string, string, error) {
+func getServerFromKubeconfig(context string, config *api.Config) (string, error) {
 	if context == "" {
 		context = config.CurrentContext
 	}
 
 	configContext, ok := config.Contexts[context]
 	if !ok {
-		return "", "", fmt.Errorf("could not find cluster for context %q", context)
+		return "", fmt.Errorf("could not find cluster for context %q", context)
 	}
 	cluster, ok := config.Clusters[configContext.Cluster]
 	if !ok {
-		return "", "", fmt.Errorf("could not find server for context %q", context)
+		return "", fmt.Errorf("could not find server for context %q", context)
 	}
-	return context, cluster.Server, nil
+	return cluster.Server, nil
 }
 
 const (
@@ -362,7 +366,7 @@ func createRemoteSecret(opt RemoteSecretOptions, client kubernetes.Interface, en
 		return nil, fmt.Errorf("could not get access token to read resources from local kube-apiserver: %v", err)
 	}
 
-	currentContext, server, err := getCurrentContextAndClusterServerFromKubeconfig(opt.Context, env.GetConfig())
+	server, err := getServerFromKubeconfig(opt.Context, env.GetConfig())
 	if err != nil {
 		return nil, err
 	}
@@ -370,19 +374,21 @@ func createRemoteSecret(opt RemoteSecretOptions, client kubernetes.Interface, en
 	var remoteSecret *v1.Secret
 	switch opt.AuthType {
 	case RemoteSecretAuthTypeBearerToken:
-		remoteSecret, err = createRemoteSecretFromTokenAndServer(tokenSecret, opt.ClusterName, currentContext, server)
+		remoteSecret, err = createRemoteSecretFromTokenAndServer(tokenSecret, opt.ClusterName, server)
 	case RemoteSecretAuthTypePlugin:
 		authProviderConfig := &api.AuthProviderConfig{
 			Name:   opt.AuthPluginName,
 			Config: opt.AuthPluginConfig,
 		}
-		remoteSecret, err = createRemoteSecretFromPlugin(tokenSecret, currentContext, server, opt.ClusterName, authProviderConfig)
+		remoteSecret, err = createRemoteSecretFromPlugin(tokenSecret, server, opt.ClusterName, authProviderConfig)
 	default:
 		err = fmt.Errorf("unsupported authentication type: %v", opt.AuthType)
 	}
 	if err != nil {
 		return nil, err
 	}
+
+	remoteSecret.Namespace = opt.Namespace
 	return remoteSecret, nil
 }
 

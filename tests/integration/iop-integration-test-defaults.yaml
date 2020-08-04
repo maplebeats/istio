@@ -1,0 +1,37 @@
+# This file provides some defaults for integration testing.
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+spec:
+  meshConfig:
+    accessLogFile: "/dev/stdout"
+    defaultConfig:
+      proxyMetadata:
+        ISTIO_META_DNS_CAPTURE: "ALL"
+  values:
+    global:
+      proxy:
+        resources:
+          requests:
+            cpu: 10m
+            memory: 40Mi
+
+    gateways:
+      istio-ingressgateway:
+        autoscaleMax: 1
+        resources:
+          requests:
+            cpu: 10m
+            memory: 40Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+
+      istio-egressgateway:
+        autoscaleMax: 1
+        resources:
+          requests:
+            cpu: 10m
+            memory: 40Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi

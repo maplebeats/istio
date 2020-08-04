@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,12 +25,16 @@ const (
 	// of presubmit or postsubmit. When a test is determined to be Flaky, a github
 	// issue should be created to fix the test.
 	Flaky Instance = "flaky"
+
+	// Multicluster indicates that the test requires a multicluster configuration.
+	Multicluster Instance = "multicluster"
 )
 
 var all = NewSet(
 	Postsubmit,
 	CustomSetup,
-	Flaky)
+	Flaky,
+	Multicluster)
 
 // Find the label with the given name
 func Find(name string) (Instance, bool) {

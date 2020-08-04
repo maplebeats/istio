@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@ package chiron
 
 import (
 	"bytes"
+	"context"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
@@ -29,12 +30,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 
-	admissionv1 "k8s.io/client-go/kubernetes/typed/admissionregistration/v1beta1"
+	admissionv1 "k8s.io/client-go/kubernetes/typed/admissionregistration/v1"
 	certclient "k8s.io/client-go/kubernetes/typed/certificates/v1beta1"
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 
-	"istio.io/istio/security/pkg/listwatch"
+	"istio.io/istio/pkg/listwatch"
 	"istio.io/istio/security/pkg/pki/ca"
 	"istio.io/istio/security/pkg/pki/util"
 	certutil "istio.io/istio/security/pkg/util"
@@ -42,11 +43,6 @@ import (
 )
 
 type WebhookType int
-
-const (
-	MutatingWebhook WebhookType = iota
-	ValidatingWebhook
-)
 
 /* #nosec: disable gas linter */
 const (
@@ -66,12 +62,15 @@ const (
 	// The number of retries when requesting to create secret.
 	secretCreationRetry = 3
 
-	// The interval for reading a certificate
-	certReadInterval = 500 * time.Millisecond
 	// The number of tries for reading a certificate
 	maxNumCertRead = 10
-	// timeout for reading signed CSR
-	timeoutForReadingCSR = 5 * time.Second
+
+	// The interval for reading a certificate
+	certReadInterval = 500 * time.Millisecond
+)
+
+var (
+	certWatchTimeout = 5 * time.Second
 )
 
 // WebhookController manages the service accounts' secrets that contains Istio keys and certificates.
@@ -86,7 +85,7 @@ type WebhookController struct {
 	// Current CA certificate
 	CACert     []byte
 	core       corev1.CoreV1Interface
-	admission  admissionv1.AdmissionregistrationV1beta1Interface
+	admission  admissionv1.AdmissionregistrationV1Interface
 	certClient certclient.CertificatesV1beta1Interface
 	// Controller and store for secret objects.
 	scrtController cache.Controller
@@ -102,7 +101,7 @@ type WebhookController struct {
 
 // NewWebhookController returns a pointer to a newly constructed WebhookController instance.
 func NewWebhookController(gracePeriodRatio float32, minGracePeriod time.Duration,
-	core corev1.CoreV1Interface, admission admissionv1.AdmissionregistrationV1beta1Interface,
+	core corev1.CoreV1Interface, admission admissionv1.AdmissionregistrationV1Interface,
 	certClient certclient.CertificatesV1beta1Interface, k8sCaCertFile string,
 	secretNames, dnsNames, serviceNamespaces []string) (*WebhookController, error) {
 	if gracePeriodRatio < 0 || gracePeriodRatio > 1 {
@@ -154,11 +153,11 @@ func NewWebhookController(gracePeriodRatio float32, minGracePeriod time.Duration
 			return &cache.ListWatch{
 				ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
 					options.FieldSelector = istioSecretSelector
-					return core.Secrets(namespace).List(options)
+					return core.Secrets(namespace).List(context.TODO(), options)
 				},
 				WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 					options.FieldSelector = istioSecretSelector
-					return core.Secrets(namespace).Watch(options)
+					return core.Secrets(namespace).Watch(context.TODO(), options)
 				},
 			}
 		})
@@ -204,7 +203,7 @@ func (wc *WebhookController) upsertSecret(secretName, dnsName, secretNamespace s
 		Type: IstioDNSSecretType,
 	}
 
-	existingSecret, err := wc.core.Secrets(secretNamespace).Get(secretName, metav1.GetOptions{})
+	existingSecret, err := wc.core.Secrets(secretNamespace).Get(context.TODO(), secretName, metav1.GetOptions{})
 	if err == nil && existingSecret != nil {
 		log.Debugf("upsertSecret(): the secret (%v) in namespace (%v) exists, return",
 			secretName, secretNamespace)
@@ -227,7 +226,7 @@ func (wc *WebhookController) upsertSecret(secretName, dnsName, secretNamespace s
 
 	// We retry several times when create secret to mitigate transient network failures.
 	for i := 0; i < secretCreationRetry; i++ {
-		_, err = wc.core.Secrets(secretNamespace).Create(secret)
+		_, err = wc.core.Secrets(secretNamespace).Create(context.TODO(), secret, metav1.CreateOptions{})
 		if err == nil || errors.IsAlreadyExists(err) {
 			if errors.IsAlreadyExists(err) {
 				log.Infof("Istio secret \"%s\" in namespace \"%s\" already exists", secretName, secretNamespace)
@@ -343,7 +342,7 @@ func (wc *WebhookController) refreshSecret(scrt *v1.Secret) error {
 	scrt.Data[ca.PrivateKeyID] = key
 	scrt.Data[ca.RootCertID] = caCert
 
-	_, err = wc.core.Secrets(namespace).Update(scrt)
+	_, err = wc.core.Secrets(namespace).Update(context.TODO(), scrt, metav1.UpdateOptions{})
 	return err
 }
 

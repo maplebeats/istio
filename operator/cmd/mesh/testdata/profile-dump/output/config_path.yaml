@@ -1,17 +1,13 @@
 base:
   enabled: true
-citadel:
-  enabled: false
-  k8s:
-    strategy:
-      rollingUpdate:
-        maxSurge: 100%
-        maxUnavailable: 25%
 cni:
   enabled: false
 egressGateways:
 - enabled: false
   k8s:
+    env:
+    - name: ISTIO_META_ROUTER_MODE
+      value: sni-dnat
     hpaSpec:
       maxReplicas: 5
       metrics:
@@ -23,7 +19,7 @@ egressGateways:
       scaleTargetRef:
         apiVersion: apps/v1
         kind: Deployment
-        name: istio-ingressgateway
+        name: istio-egressgateway
     resources:
       limits:
         cpu: 2000m
@@ -31,25 +27,26 @@ egressGateways:
       requests:
         cpu: 100m
         memory: 128Mi
+    service:
+      ports:
+      - name: http2
+        port: 80
+      - name: https
+        port: 443
+      - name: tls
+        port: 15443
+        targetPort: 15443
     strategy:
       rollingUpdate:
         maxSurge: 100%
         maxUnavailable: 25%
   name: istio-egressgateway
-galley:
-  enabled: false
-  k8s:
-    replicaCount: 1
-    resources:
-      requests:
-        cpu: 100m
-    strategy:
-      rollingUpdate:
-        maxSurge: 100%
-        maxUnavailable: 25%
 ingressGateways:
 - enabled: true
   k8s:
+    env:
+    - name: ISTIO_META_ROUTER_MODE
+      value: sni-dnat
     hpaSpec:
       maxReplicas: 5
       metrics:
@@ -69,11 +66,27 @@ ingressGateways:
       requests:
         cpu: 100m
         memory: 128Mi
+    service:
+      ports:
+      - name: status-port
+        port: 15021
+        targetPort: 15021
+      - name: http2
+        port: 80
+        targetPort: 8080
+      - name: https
+        port: 443
+        targetPort: 8443
+      - name: tls
+        port: 15443
+        targetPort: 15443
     strategy:
       rollingUpdate:
         maxSurge: 100%
         maxUnavailable: 25%
   name: istio-ingressgateway
+istiodRemote:
+  enabled: false
 pilot:
   enabled: false
   k8s:
@@ -92,8 +105,8 @@ pilot:
       httpGet:
         path: /ready
         port: 8080
-      initialDelaySeconds: 5
-      periodSeconds: 5
+      initialDelaySeconds: 1
+      periodSeconds: 3
       timeoutSeconds: 5
     strategy:
       rollingUpdate:
@@ -101,66 +114,6 @@ pilot:
         maxUnavailable: 25%
 policy:
   enabled: false
-  k8s:
-    env:
-    - name: POD_NAMESPACE
-      valueFrom:
-        fieldRef:
-          apiVersion: v1
-          fieldPath: metadata.namespace
-    hpaSpec:
-      maxReplicas: 5
-      metrics:
-      - resource:
-          name: cpu
-          targetAverageUtilization: 80
-        type: Resource
-      minReplicas: 1
-      scaleTargetRef:
-        apiVersion: apps/v1
-        kind: Deployment
-        name: istio-policy
-    strategy:
-      rollingUpdate:
-        maxSurge: 100%
-        maxUnavailable: 25%
-proxy:
-  enabled: false
-sidecarInjector:
-  enabled: false
 telemetry:
   enabled: false
-  k8s:
-    env:
-    - name: POD_NAMESPACE
-      valueFrom:
-        fieldRef:
-          apiVersion: v1
-          fieldPath: metadata.namespace
-    - name: GOMAXPROCS
-      value: "6"
-    hpaSpec:
-      maxReplicas: 5
-      metrics:
-      - resource:
-          name: cpu
-          targetAverageUtilization: 80
-        type: Resource
-      minReplicas: 1
-      scaleTargetRef:
-        apiVersion: apps/v1
-        kind: Deployment
-        name: istio-telemetry
-    replicaCount: 1
-    resources:
-      limits:
-        cpu: 4800m
-        memory: 4G
-      requests:
-        cpu: 1000m
-        memory: 1G
-    strategy:
-      rollingUpdate:
-        maxSurge: 100%
-        maxUnavailable: 25%
 

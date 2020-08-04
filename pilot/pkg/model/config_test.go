@@ -1,4 +1,4 @@
-// Copyright 2017 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,24 +21,18 @@ import (
 	"time"
 
 	"github.com/davecgh/go-spew/spew"
-	"github.com/gogo/protobuf/proto"
-	"github.com/gogo/protobuf/types"
 
-	mccpb "istio.io/api/mixer/v1/config/client"
 	networking "istio.io/api/networking/v1alpha3"
-	rbacproto "istio.io/api/rbac/v1alpha1"
-	authz "istio.io/api/security/v1beta1"
-	api "istio.io/api/type/v1beta1"
 
 	"istio.io/istio/pilot/pkg/config/memory"
 	"istio.io/istio/pilot/pkg/model"
 	mock_config "istio.io/istio/pilot/test/mock"
-	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/config/host"
 	"istio.io/istio/pkg/config/labels"
 	"istio.io/istio/pkg/config/protocol"
 	"istio.io/istio/pkg/config/schema/collection"
 	"istio.io/istio/pkg/config/schema/collections"
+	"istio.io/istio/pkg/config/schema/gvk"
 	"istio.io/istio/pkg/config/schema/resource"
 )
 
@@ -141,73 +135,6 @@ func TestPortList(t *testing.T) {
 	}
 }
 
-func TestServiceKey(t *testing.T) {
-	svc := &model.Service{Hostname: "hostname"}
-
-	// Verify Service.Key() delegates to ServiceKey()
-	{
-		want := "hostname|http|a=b,c=d"
-		port := &model.Port{Name: "http", Port: 80, Protocol: protocol.HTTP}
-		l := labels.Instance{"a": "b", "c": "d"}
-		got := svc.Key(port, l)
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("Service.Key() failed: got %v want %v", got, want)
-		}
-	}
-
-	cases := []struct {
-		port model.PortList
-		l    labels.Collection
-		want string
-	}{
-		{
-			port: model.PortList{
-				{Name: "http", Port: 80, Protocol: protocol.HTTP},
-				{Name: "http-alt", Port: 8080, Protocol: protocol.HTTP},
-			},
-			l:    labels.Collection{{"a": "b", "c": "d"}},
-			want: "hostname|http,http-alt|a=b,c=d",
-		},
-		{
-			port: model.PortList{{Name: "http", Port: 80, Protocol: protocol.HTTP}},
-			l:    labels.Collection{{"a": "b", "c": "d"}},
-			want: "hostname|http|a=b,c=d",
-		},
-		{
-			port: model.PortList{{Port: 80, Protocol: protocol.HTTP}},
-			l:    labels.Collection{{"a": "b", "c": "d"}},
-			want: "hostname||a=b,c=d",
-		},
-		{
-			port: model.PortList{},
-			l:    labels.Collection{{"a": "b", "c": "d"}},
-			want: "hostname||a=b,c=d",
-		},
-		{
-			port: model.PortList{{Name: "http", Port: 80, Protocol: protocol.HTTP}},
-			l:    labels.Collection{nil},
-			want: "hostname|http",
-		},
-		{
-			port: model.PortList{{Name: "http", Port: 80, Protocol: protocol.HTTP}},
-			l:    labels.Collection{},
-			want: "hostname|http",
-		},
-		{
-			port: model.PortList{},
-			l:    labels.Collection{},
-			want: "hostname",
-		},
-	}
-
-	for _, c := range cases {
-		got := model.ServiceKey(svc.Hostname, c.port, c.l)
-		if !reflect.DeepEqual(got, c.want) {
-			t.Errorf("Failed: got %q want %q", got, c.want)
-		}
-	}
-}
-
 func TestSubsetKey(t *testing.T) {
 	hostname := host.Name("hostname")
 	cases := []struct {
@@ -278,64 +205,6 @@ func TestConfigKey(t *testing.T) {
 	}
 }
 
-func TestResolveHostname(t *testing.T) {
-	cases := []struct {
-		meta model.ConfigMeta
-		svc  *mccpb.IstioService
-		want host.Name
-	}{
-		{
-			meta: model.ConfigMeta{Namespace: "default", Domain: "cluster.local"},
-			svc:  &mccpb.IstioService{Name: "hello"},
-			want: "hello.default.svc.cluster.local",
-		},
-		{
-			meta: model.ConfigMeta{Namespace: "foo", Domain: "foo"},
-			svc: &mccpb.IstioService{Name: "hello",
-				Namespace: "default", Domain: "svc.cluster.local"},
-			want: "hello.default.svc.cluster.local",
-		},
-		{
-			meta: model.ConfigMeta{},
-			svc:  &mccpb.IstioService{Name: "hello"},
-			want: "hello",
-		},
-		{
-			meta: model.ConfigMeta{Namespace: "default"},
-			svc:  &mccpb.IstioService{Name: "hello"},
-			want: "hello.default",
-		},
-		{
-			meta: model.ConfigMeta{Namespace: "default", Domain: "cluster.local"},
-			svc:  &mccpb.IstioService{Service: "reviews.service.consul"},
-			want: "reviews.service.consul",
-		},
-		{
-			meta: model.ConfigMeta{Namespace: "foo", Domain: "foo"},
-			svc: &mccpb.IstioService{Name: "hello", Service: "reviews.service.consul",
-				Namespace: "default", Domain: "svc.cluster.local"},
-			want: "reviews.service.consul",
-		},
-		{
-			meta: model.ConfigMeta{Namespace: "default", Domain: "cluster.local"},
-			svc:  &mccpb.IstioService{Service: "*cnn.com"},
-			want: "*cnn.com",
-		},
-		{
-			meta: model.ConfigMeta{Namespace: "foo", Domain: "foo"},
-			svc: &mccpb.IstioService{Name: "hello", Service: "*cnn.com",
-				Namespace: "default", Domain: "svc.cluster.local"},
-			want: "*cnn.com",
-		},
-	}
-
-	for _, test := range cases {
-		if got := model.ResolveHostname(test.meta, test.svc); got != test.want {
-			t.Errorf("ResolveHostname(%v, %v) => got %q, want %q", test.meta, test.svc, got, test.want)
-		}
-	}
-}
-
 func TestResolveShortnameToFQDN(t *testing.T) {
 	tests := []struct {
 		name string
@@ -387,10 +256,18 @@ func TestMostSpecificHostMatch(t *testing.T) {
 		{[]host.Name{"*.foo.com", "foo.com"}, "*.foo.com", "*.foo.com"},
 
 		// this passes because we sort alphabetically
-		{[]host.Name{"bar.com", "foo.com"}, "*.com", "bar.com"},
+		{[]host.Name{"bar.com", "foo.com"}, "*.com", ""},
 
-		{[]host.Name{"bar.com", "*.foo.com"}, "*foo.com", "*.foo.com"},
-		{[]host.Name{"foo.com", "*.foo.com"}, "*foo.com", "foo.com"},
+		{[]host.Name{"bar.com", "*.foo.com"}, "*foo.com", ""},
+		{[]host.Name{"foo.com", "*.foo.com"}, "*foo.com", ""},
+
+		// should prioritize closest match
+		{[]host.Name{"*.bar.com", "foo.bar.com"}, "foo.bar.com", "foo.bar.com"},
+		{[]host.Name{"*.foo.bar.com", "bar.foo.bar.com"}, "bar.foo.bar.com", "bar.foo.bar.com"},
+
+		// should not match non-wildcards for wildcard needle
+		{[]host.Name{"bar.foo.com", "foo.bar.com"}, "*.foo.com", ""},
+		{[]host.Name{"foo.bar.foo.com", "bar.foo.bar.com"}, "*.bar.foo.com", ""},
 	}
 
 	for idx, tt := range tests {
@@ -405,85 +282,8 @@ func TestMostSpecificHostMatch(t *testing.T) {
 	}
 }
 
-func TestServiceRoles(t *testing.T) {
-	store := model.MakeIstioStore(memory.Make(collections.Pilot))
-	addRbacConfigToStore(collections.IstioRbacV1Alpha1Serviceroles.Resource().Kind(), "role1", "istio-system", store, t)
-	addRbacConfigToStore(collections.IstioRbacV1Alpha1Serviceroles.Resource().Kind(), "role2", "default", store, t)
-	addRbacConfigToStore(collections.IstioRbacV1Alpha1Serviceroles.Resource().Kind(), "role3", "istio-system", store, t)
-	tests := []struct {
-		namespace  string
-		expectName map[string]bool
-	}{
-		{namespace: "wrong", expectName: nil},
-		{namespace: "default", expectName: map[string]bool{"role2": true}},
-		{namespace: "istio-system", expectName: map[string]bool{"role1": true, "role3": true}},
-	}
-
-	for _, tt := range tests {
-		cfg := store.ServiceRoles(tt.namespace)
-		if tt.expectName != nil {
-			for _, cfg := range cfg {
-				if !tt.expectName[cfg.Name] {
-					t.Errorf("model.ServiceRoles: expecting %v, but got %v", tt.expectName, cfg)
-				}
-			}
-		} else if len(cfg) != 0 {
-			t.Errorf("model.ServiceRoles: expecting nil, but got %v", cfg)
-		}
-	}
-}
-
-func TestServiceRoleBindings(t *testing.T) {
-	store := model.MakeIstioStore(memory.Make(collections.Pilot))
-	addRbacConfigToStore(collections.IstioRbacV1Alpha1Servicerolebindings.Resource().Kind(), "binding1", "istio-system", store, t)
-	addRbacConfigToStore(collections.IstioRbacV1Alpha1Servicerolebindings.Resource().Kind(), "binding2", "default", store, t)
-	addRbacConfigToStore(collections.IstioRbacV1Alpha1Servicerolebindings.Resource().Kind(), "binding3", "istio-system", store, t)
-	tests := []struct {
-		namespace  string
-		expectName map[string]bool
-	}{
-		{namespace: "wrong", expectName: nil},
-		{namespace: "default", expectName: map[string]bool{"binding2": true}},
-		{namespace: "istio-system", expectName: map[string]bool{"binding1": true, "binding3": true}},
-	}
-
-	for _, tt := range tests {
-		cfg := store.ServiceRoleBindings(tt.namespace)
-		if tt.expectName != nil {
-			for _, cfg := range cfg {
-				if !tt.expectName[cfg.Name] {
-					t.Errorf("model.ServiceRoleBinding: expecting %v, but got %v", tt.expectName, cfg)
-				}
-			}
-		} else if len(cfg) != 0 {
-			t.Errorf("model.ServiceRoleBinding: expecting nil, but got %v", cfg)
-		}
-	}
-}
-
-func TestRbacConfig(t *testing.T) {
-	store := model.MakeIstioStore(memory.Make(collections.Pilot))
-	addRbacConfigToStore(collections.IstioRbacV1Alpha1Rbacconfigs.Resource().Kind(), constants.DefaultRbacConfigName, "", store, t)
-	rbacConfig := store.RbacConfig()
-	if rbacConfig.Name != constants.DefaultRbacConfigName {
-		t.Errorf("model.RbacConfig: expecting %s, but got %s", constants.DefaultRbacConfigName, rbacConfig.Name)
-	}
-}
-
-func TestClusterRbacConfig(t *testing.T) {
-	store := model.MakeIstioStore(memory.Make(collections.Pilot))
-	addRbacConfigToStore(collections.IstioRbacV1Alpha1Clusterrbacconfigs.Resource().Kind(), constants.DefaultRbacConfigName, "", store, t)
-	rbacConfig := store.ClusterRbacConfig()
-	if rbacConfig.Name != constants.DefaultRbacConfigName {
-		t.Errorf("model.ClusterRbacConfig: expecting %s, but got %s", constants.DefaultRbacConfigName, rbacConfig.Name)
-	}
-}
-
 func TestAuthorizationPolicies(t *testing.T) {
 	store := model.MakeIstioStore(memory.Make(collections.Pilot))
-	addRbacConfigToStore(collections.IstioSecurityV1Beta1Authorizationpolicies.Resource().Kind(), "policy1", "istio-system", store, t)
-	addRbacConfigToStore(collections.IstioSecurityV1Beta1Authorizationpolicies.Resource().Kind(), "policy2", "default", store, t)
-	addRbacConfigToStore(collections.IstioSecurityV1Beta1Authorizationpolicies.Resource().Kind(), "policy3", "istio-system", store, t)
 	tests := []struct {
 		namespace  string
 		expectName map[string]bool
@@ -507,55 +307,6 @@ func TestAuthorizationPolicies(t *testing.T) {
 	}
 }
 
-func addRbacConfigToStore(kind, name, namespace string, store model.IstioConfigStore, t *testing.T) {
-	var value proto.Message
-	var group, version string
-	switch kind {
-	case collections.IstioRbacV1Alpha1Serviceroles.Resource().Kind():
-		group = collections.IstioRbacV1Alpha1Serviceroles.Resource().Group()
-		version = collections.IstioRbacV1Alpha1Serviceroles.Resource().Version()
-		value = &rbacproto.ServiceRole{Rules: []*rbacproto.AccessRule{
-			{Services: []string{"service0"}, Methods: []string{"GET"}}}}
-	case collections.IstioRbacV1Alpha1Servicerolebindings.Resource().Kind():
-		group = collections.IstioRbacV1Alpha1Servicerolebindings.Resource().Group()
-		version = collections.IstioRbacV1Alpha1Servicerolebindings.Resource().Version()
-		value = &rbacproto.ServiceRoleBinding{
-			Subjects: []*rbacproto.Subject{{User: "User0"}},
-			RoleRef:  &rbacproto.RoleRef{Kind: "ServiceRole", Name: "ServiceRole001"}}
-	case collections.IstioSecurityV1Beta1Authorizationpolicies.Resource().Kind():
-		group = collections.IstioSecurityV1Beta1Authorizationpolicies.Resource().Group()
-		version = collections.IstioSecurityV1Beta1Authorizationpolicies.Resource().Version()
-		value = &authz.AuthorizationPolicy{
-			Selector: &api.WorkloadSelector{
-				MatchLabels: map[string]string{"app": "test"},
-			},
-		}
-	case collections.IstioRbacV1Alpha1Rbacconfigs.Resource().Kind():
-		group = collections.IstioRbacV1Alpha1Rbacconfigs.Resource().Group()
-		version = collections.IstioRbacV1Alpha1Rbacconfigs.Resource().Version()
-		value = &rbacproto.RbacConfig{Mode: rbacproto.RbacConfig_ON}
-	case collections.IstioRbacV1Alpha1Clusterrbacconfigs.Resource().Kind():
-		group = collections.IstioRbacV1Alpha1Clusterrbacconfigs.Resource().Group()
-		version = collections.IstioRbacV1Alpha1Clusterrbacconfigs.Resource().Version()
-		value = &rbacproto.RbacConfig{Mode: rbacproto.RbacConfig_ON}
-	default:
-		panic("Unknown kind: " + kind)
-	}
-	cfg := model.Config{
-		ConfigMeta: model.ConfigMeta{
-			Type:      kind,
-			Group:     group,
-			Version:   version,
-			Name:      name,
-			Namespace: namespace,
-		},
-		Spec: value, // Not used in test, added to pass validation.
-	}
-	if _, err := store.Create(cfg); err != nil {
-		t.Error(err)
-	}
-}
-
 type fakeStore struct {
 	model.ConfigStore
 	cfg map[resource.GroupVersionKind][]model.Config
@@ -571,121 +322,11 @@ func (l *fakeStore) Schemas() collection.Schemas {
 	return collections.Pilot
 }
 
-func TestIstioConfigStore_QuotaSpecByDestination(t *testing.T) {
-	ns := "ns1"
-	l := &fakeStore{
-		cfg: map[resource.GroupVersionKind][]model.Config{
-			collections.IstioMixerV1ConfigClientQuotaspecbindings.Resource().GroupVersionKind(): {
-				{
-					ConfigMeta: model.ConfigMeta{
-						Namespace: ns,
-						Domain:    "cluster.local",
-					},
-					Spec: &mccpb.QuotaSpecBinding{
-						Services: []*mccpb.IstioService{
-							{
-								Name:      "a",
-								Namespace: ns,
-							},
-						},
-						QuotaSpecs: []*mccpb.QuotaSpecBinding_QuotaSpecReference{
-							{
-								Name: "request-count",
-							},
-							{
-								Name: "does-not-exist",
-							},
-						},
-					},
-				},
-			},
-			collections.IstioMixerV1ConfigClientQuotaspecs.Resource().GroupVersionKind(): {
-				{
-					ConfigMeta: model.ConfigMeta{
-						Name:      "request-count",
-						Namespace: ns,
-					},
-					Spec: &mccpb.QuotaSpec{
-						Rules: []*mccpb.QuotaRule{
-							{
-								Quotas: []*mccpb.Quota{
-									{
-										Quota:  "requestcount",
-										Charge: 100,
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-	ii := model.MakeIstioStore(l)
-	cfgs := ii.QuotaSpecByDestination(&model.ServiceInstance{
-		Service: &model.Service{
-			Hostname: host.Name("a." + ns + ".svc.cluster.local"),
-		},
-	})
-
-	if len(cfgs) != 1 {
-		t.Fatalf("did not find 1 matched quota")
-	}
-}
-
-func TestMatchesDestHost(t *testing.T) {
-	for _, tst := range []struct {
-		destinationHost string
-		svc             string
-		ans             bool
-	}{
-		{
-			destinationHost: "myhost.ns.cluster.local",
-			svc:             "myhost.ns.cluster.local",
-			ans:             true,
-		},
-		{
-			destinationHost: "myhost.ns.cluster.local",
-			svc:             "*",
-			ans:             true,
-		},
-		{
-			destinationHost: "myhost.ns.cluster.local",
-			svc:             "*.ns.*",
-			ans:             true,
-		},
-		{
-			destinationHost: "myhost.ns.cluster.local",
-			svc:             "*.ns2.*",
-			ans:             false,
-		},
-		{
-			destinationHost: "myhost.ns.cluster.local",
-			svc:             "myhost.ns2.cluster.local",
-			ans:             false,
-		},
-		{
-			destinationHost: "myhost.ns.cluster.local",
-			svc:             "ns.*.svc.cluster",
-			ans:             false,
-		},
-	} {
-		t.Run(fmt.Sprintf("%s-%s", tst.destinationHost, tst.svc), func(t *testing.T) {
-			ans := model.MatchesDestHost(tst.destinationHost, model.ConfigMeta{}, &mccpb.IstioService{
-				Service: tst.svc,
-			})
-			if ans != tst.ans {
-				t.Fatalf("want: %v, got: %v", tst.ans, ans)
-			}
-		})
-	}
-}
-
 func TestIstioConfigStore_ServiceEntries(t *testing.T) {
 	ns := "ns1"
 	l := &fakeStore{
 		cfg: map[resource.GroupVersionKind][]model.Config{
-			collections.IstioNetworkingV1Alpha3Serviceentries.Resource().GroupVersionKind(): {
+			gvk.ServiceEntry: {
 				{
 					ConfigMeta: model.ConfigMeta{
 						Name:      "request-count-1",
@@ -698,26 +339,6 @@ func TestIstioConfigStore_ServiceEntries(t *testing.T) {
 								Name:     "https",
 								Number:   443,
 								Protocol: "HTTP",
-							},
-						},
-					},
-				},
-			},
-			collections.IstioMixerV1ConfigClientQuotaspecs.Resource().GroupVersionKind(): {
-				{
-					ConfigMeta: model.ConfigMeta{
-						Name:      "request-count-2",
-						Namespace: ns,
-					},
-					Spec: &mccpb.QuotaSpec{
-						Rules: []*mccpb.QuotaRule{
-							{
-								Quotas: []*mccpb.Quota{
-									{
-										Quota:  "requestcount",
-										Charge: 100,
-									},
-								},
 							},
 						},
 					},
@@ -763,7 +384,7 @@ func TestIstioConfigStore_Gateway(t *testing.T) {
 
 	l := &fakeStore{
 		cfg: map[resource.GroupVersionKind][]model.Config{
-			collections.IstioNetworkingV1Alpha3Gateways.Resource().GroupVersionKind(): {gw1, gw2, gw3},
+			gvk.Gateway: {gw1, gw2, gw3},
 		},
 	}
 	ii := model.MakeIstioStore(l)
@@ -777,55 +398,6 @@ func TestIstioConfigStore_Gateway(t *testing.T) {
 	cfgs := ii.Gateways(workloadLabels)
 
 	if !reflect.DeepEqual(expectedConfig, cfgs) {
-		t.Errorf("Got different Config, Excepted:\n%v\n, Got: \n%v\n", expectedConfig, cfgs)
-	}
-}
-
-func TestIstioConfigStore_EnvoyFilter(t *testing.T) {
-	ns := "ns1"
-	workloadLabels := labels.Collection{}
-
-	l := &fakeStore{
-		cfg: map[resource.GroupVersionKind][]model.Config{
-			collections.IstioNetworkingV1Alpha3Envoyfilters.Resource().GroupVersionKind(): {
-				{
-					ConfigMeta: model.ConfigMeta{
-						Name:      "request-count",
-						Namespace: ns,
-					},
-					Spec: &networking.EnvoyFilter{
-						Filters: []*networking.EnvoyFilter_Filter{
-							{
-								InsertPosition: &networking.EnvoyFilter_InsertPosition{
-									Index: networking.EnvoyFilter_InsertPosition_FIRST,
-								},
-								FilterType:   networking.EnvoyFilter_Filter_NETWORK,
-								FilterName:   "envoy.foo",
-								FilterConfig: &types.Struct{},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-	ii := model.MakeIstioStore(l)
-	mergedFilterConfig := &networking.EnvoyFilter{
-		Filters: []*networking.EnvoyFilter_Filter{
-			{
-				InsertPosition: &networking.EnvoyFilter_InsertPosition{
-					Index: networking.EnvoyFilter_InsertPosition_FIRST,
-				},
-				FilterType:   networking.EnvoyFilter_Filter_NETWORK,
-				FilterName:   "envoy.foo",
-				FilterConfig: &types.Struct{},
-			},
-		},
-	}
-	expectedConfig := &model.Config{Spec: mergedFilterConfig}
-	cfgs := ii.EnvoyFilter(workloadLabels)
-
-	if !reflect.DeepEqual(*expectedConfig, *cfgs) {
 		t.Errorf("Got different Config, Excepted:\n%v\n, Got: \n%v\n", expectedConfig, cfgs)
 	}
 }
@@ -849,4 +421,12 @@ func TestDeepCopy(t *testing.T) {
 		t.Fatalf("cloned config is not identical")
 	}
 
+	// change the copied gateway to see if the original config is not effected
+	copiedGateway := copied.Spec.(*networking.Gateway)
+	copiedGateway.Selector = map[string]string{"app": "test"}
+
+	gateway := cfg.Spec.(*networking.Gateway)
+	if gateway.Selector != nil {
+		t.Errorf("Original gateway is mutated")
+	}
 }

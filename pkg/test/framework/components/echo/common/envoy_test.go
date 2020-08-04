@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -45,6 +45,14 @@ func TestCheckOutboundConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	cluster := resource.FakeCluster{
+		NameValue: "cluster-0",
+	}
+
+	src := testConfig{
+		cluster: cluster,
+	}
+
 	cfgs := []testConfig{
 		{
 			protocol:    protocol.HTTP,
@@ -53,6 +61,7 @@ func TestCheckOutboundConfig(t *testing.T) {
 			domain:      "cluster.local",
 			servicePort: 80,
 			address:     "10.43.241.185",
+			cluster:     cluster,
 		},
 		{
 			protocol:    protocol.HTTP,
@@ -61,6 +70,7 @@ func TestCheckOutboundConfig(t *testing.T) {
 			domain:      "cluster.local",
 			servicePort: 8080,
 			address:     "10.43.241.185",
+			cluster:     cluster,
 		},
 		{
 			protocol:    protocol.TCP,
@@ -69,6 +79,7 @@ func TestCheckOutboundConfig(t *testing.T) {
 			domain:      "cluster.local",
 			servicePort: 90,
 			address:     "10.43.241.185",
+			cluster:     cluster,
 		},
 		{
 			protocol:    protocol.HTTPS,
@@ -77,6 +88,7 @@ func TestCheckOutboundConfig(t *testing.T) {
 			domain:      "cluster.local",
 			servicePort: 9090,
 			address:     "10.43.241.185",
+			cluster:     cluster,
 		},
 		{
 			protocol:    protocol.HTTP2,
@@ -85,6 +97,7 @@ func TestCheckOutboundConfig(t *testing.T) {
 			domain:      "cluster.local",
 			servicePort: 70,
 			address:     "10.43.241.185",
+			cluster:     cluster,
 		},
 		{
 			protocol:    protocol.GRPC,
@@ -93,6 +106,7 @@ func TestCheckOutboundConfig(t *testing.T) {
 			domain:      "cluster.local",
 			servicePort: 7070,
 			address:     "10.43.241.185",
+			cluster:     cluster,
 		},
 	}
 
@@ -100,7 +114,7 @@ func TestCheckOutboundConfig(t *testing.T) {
 
 	for _, cfg := range cfgs {
 		t.Run(fmt.Sprintf("%s_%d[%s]", cfg.service, cfg.servicePort, cfg.protocol), func(t *testing.T) {
-			if err := common.CheckOutboundConfig(&cfg, cfg.Config().Ports[0], validator); err != nil {
+			if err := common.CheckOutboundConfig(&src, &cfg, cfg.Config().Ports[0], validator); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -117,6 +131,7 @@ type testConfig struct {
 	service     string
 	domain      string
 	namespace   string
+	cluster     resource.Cluster
 }
 
 func (e *testConfig) Owner() echo.Instance {
@@ -136,6 +151,7 @@ func (e *testConfig) Address() string {
 
 func (e *testConfig) Config() echo.Config {
 	return echo.Config{
+		Cluster: e.cluster,
 		Service: e.service,
 		Namespace: &fakeNamespace{
 			name: e.namespace,

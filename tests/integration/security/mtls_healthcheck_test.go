@@ -1,4 +1,4 @@
-//  Copyright 2019 Istio Authors
+//  Copyright Istio Authors
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
 //  you may not use this file except in compliance with the License.
@@ -16,7 +16,6 @@ package security
 
 import (
 	"fmt"
-	"strconv"
 	"testing"
 	"time"
 
@@ -25,7 +24,6 @@ import (
 	"istio.io/istio/pkg/test/framework/components/echo"
 
 	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
-	"istio.io/istio/pkg/test/framework/components/environment"
 	"istio.io/istio/pkg/test/framework/components/namespace"
 )
 
@@ -35,7 +33,6 @@ import (
 // on Minikube. For more details, see https://github.com/istio/istio/issues/12754.
 func TestMtlsHealthCheck(t *testing.T) {
 	framework.NewTest(t).
-		RequiresEnvironment(environment.Kube).
 		Run(func(ctx framework.TestContext) {
 			ns := namespace.NewOrFail(t, ctx, namespace.Config{Prefix: "healthcheck", Inject: true})
 			for _, testCase := range []struct {
@@ -56,42 +53,41 @@ func runHealthCheckDeployment(t *testing.T, ctx framework.TestContext, ns namesp
 	name string, rewrite bool) {
 	t.Helper()
 	wantSuccess := rewrite
-	policyYAML := fmt.Sprintf(`apiVersion: "authentication.istio.io/v1alpha1"
-kind: "Policy"
+	policyYAML := fmt.Sprintf(`apiVersion: "security.istio.io/v1beta1"
+kind: "PeerAuthentication"
 metadata:
   name: "mtls-strict-for-%v"
 spec:
-  targets:
-  - name: "%v"
-  peers:
-    - mtls:
-        mode: STRICT
+  selector:
+    matchLabels:
+      app: "%v"
+  mtls:
+    mode: STRICT
 `, name, name)
-	g.ApplyConfigOrFail(t, ns, policyYAML)
-	defer g.DeleteConfigOrFail(t, ns, policyYAML)
+	ctx.Config().ApplyYAMLOrFail(t, ns.Name(), policyYAML)
+	defer ctx.Config().DeleteYAMLOrFail(t, ns.Name(), policyYAML)
 
 	var healthcheck echo.Instance
 	cfg := echo.Config{
 		Namespace: ns,
 		Service:   name,
-		Pilot:     p,
-		Galley:    g,
 		Ports: []echo.Port{{
 			Name:         "http-8080",
 			Protocol:     protocol.HTTP,
 			ServicePort:  8080,
 			InstancePort: 8080,
 		}},
+		Subsets: []echo.SubsetConfig{
+			{
+				Annotations: echo.NewAnnotations().SetBool(echo.SidecarRewriteAppHTTPProbers, rewrite),
+			},
+		},
 	}
 	// Negative test, we expect the health check fails, so set a timeout duration.
 	if !rewrite {
-		cfg.ReadinessTimeout = time.Second * 40
+		cfg.ReadinessTimeout = time.Second * 15
 	}
-	cfg.Annotations = map[echo.Annotation]*echo.AnnotationValue{
-		echo.SidecarRewriteAppHTTPProbers: {
-			Value: strconv.FormatBool(rewrite)},
-	}
-	err := echoboot.NewBuilderOrFail(t, ctx).
+	_, err := echoboot.NewBuilder(ctx).
 		With(&healthcheck, cfg).
 		Build()
 	gotSuccess := err == nil

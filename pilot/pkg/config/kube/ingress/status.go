@@ -1,4 +1,4 @@
-// Copyright 2017 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,26 +15,26 @@
 package ingress
 
 import (
+	"context"
 	"net"
 	"sort"
 	"strings"
 	"time"
 
 	coreV1 "k8s.io/api/core/v1"
-	"k8s.io/api/extensions/v1beta1"
+	"k8s.io/api/networking/v1beta1"
 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/cache"
+	listerv1 "k8s.io/client-go/listers/core/v1"
+	listerv1beta1 "k8s.io/client-go/listers/networking/v1beta1"
 
 	meshconfig "istio.io/api/mesh/v1alpha1"
-	"istio.io/istio/pilot/pkg/leaderelection"
+
 	"istio.io/istio/pilot/pkg/serviceregistry/kube"
-	controller2 "istio.io/istio/pilot/pkg/serviceregistry/kube/controller"
-	queue2 "istio.io/istio/pkg/queue"
+	kubelib "istio.io/istio/pkg/kube"
+	"istio.io/istio/pkg/queue"
 
 	"istio.io/pkg/log"
 )
@@ -53,57 +53,39 @@ type StatusSyncer struct {
 	// Name of service (ingressgateway default) to find the IP
 	ingressService string
 
-	queue    queue2.Instance
-	informer cache.SharedIndexInformer
+	queue         queue.Instance
+	ingressLister listerv1beta1.IngressLister
+	podLister     listerv1.PodLister
+	serviceLister listerv1.ServiceLister
+	nodeLister    listerv1.NodeLister
 }
 
 // Run the syncer until stopCh is closed
 func (s *StatusSyncer) Run(stopCh <-chan struct{}) {
-	go s.informer.Run(stopCh)
-	<-stopCh
-	// TODO: should we remove current IPs on shutting down?
+	go s.queue.Run(stopCh)
+	go s.runUpdateStatus(stopCh)
 }
 
 // NewStatusSyncer creates a new instance
-func NewStatusSyncer(mesh *meshconfig.MeshConfig,
-	client kubernetes.Interface,
-	options controller2.Options,
-	l *leaderelection.LeaderElection) (*StatusSyncer, error) {
+func NewStatusSyncer(mesh *meshconfig.MeshConfig, client kubelib.Client) (*StatusSyncer, error) {
 
 	// we need to use the defined ingress class to allow multiple leaders
 	// in order to update information about ingress status
 	ingressClass, defaultIngressClass := convertIngressControllerMode(mesh.IngressControllerMode, mesh.IngressClass)
 
 	// queue requires a time duration for a retry delay after a handler error
-	queue := queue2.NewQueue(1 * time.Second)
-
-	informer := cache.NewSharedIndexInformer(
-		&cache.ListWatch{
-			ListFunc: func(opts metaV1.ListOptions) (runtime.Object, error) {
-				return client.ExtensionsV1beta1().Ingresses(options.WatchedNamespace).List(opts)
-			},
-			WatchFunc: func(opts metaV1.ListOptions) (watch.Interface, error) {
-				return client.ExtensionsV1beta1().Ingresses(options.WatchedNamespace).Watch(opts)
-			},
-		},
-		&v1beta1.Ingress{}, options.ResyncPeriod, cache.Indexers{},
-	)
+	q := queue.NewQueue(1 * time.Second)
 
 	st := StatusSyncer{
 		client:              client,
-		informer:            informer,
-		queue:               queue,
+		ingressLister:       client.KubeInformer().Networking().V1beta1().Ingresses().Lister(),
+		podLister:           client.KubeInformer().Core().V1().Pods().Lister(),
+		serviceLister:       client.KubeInformer().Core().V1().Services().Lister(),
+		nodeLister:          client.KubeInformer().Core().V1().Nodes().Lister(),
+		queue:               q,
 		ingressClass:        ingressClass,
 		defaultIngressClass: defaultIngressClass,
 		ingressService:      mesh.IngressService,
-	}
-
-	if l != nil {
-		l.AddRunFunction(func(stop <-chan struct{}) {
-			log.Infof("Starting ingress status controller")
-			go st.queue.Run(stop)
-			go st.runUpdateStatus(stop)
-		})
 	}
 
 	return &st, nil
@@ -144,9 +126,11 @@ func (s *StatusSyncer) runUpdateStatus(stop <-chan struct{}) {
 
 // updateStatus updates ingress status with the list of IP
 func (s *StatusSyncer) updateStatus(status []coreV1.LoadBalancerIngress) error {
-	ingressStore := s.informer.GetStore()
-	for _, obj := range ingressStore.List() {
-		currIng := obj.(*v1beta1.Ingress)
+	l, err := s.ingressLister.List(labels.Everything())
+	if err != nil {
+		return err
+	}
+	for _, currIng := range l {
 		if !classIsValid(currIng, s.ingressClass, s.defaultIngressClass) {
 			continue
 		}
@@ -162,8 +146,7 @@ func (s *StatusSyncer) updateStatus(status []coreV1.LoadBalancerIngress) error {
 
 		currIng.Status.LoadBalancer.Ingress = status
 
-		ingClient := s.client.ExtensionsV1beta1().Ingresses(currIng.Namespace)
-		_, err := ingClient.UpdateStatus(currIng)
+		_, err := s.client.NetworkingV1beta1().Ingresses(currIng.Namespace).UpdateStatus(context.TODO(), currIng, metaV1.UpdateOptions{})
 		if err != nil {
 			log.Warnf("error updating ingress status: %v", err)
 		}
@@ -178,7 +161,7 @@ func (s *StatusSyncer) runningAddresses(ingressNs string) ([]string, error) {
 	addrs := make([]string, 0)
 
 	if s.ingressService != "" {
-		svc, err := s.client.CoreV1().Services(ingressNs).Get(s.ingressService, metaV1.GetOptions{})
+		svc, err := s.serviceLister.Services(ingressNs).Get(s.ingressService)
 		if err != nil {
 			return nil, err
 		}
@@ -201,22 +184,19 @@ func (s *StatusSyncer) runningAddresses(ingressNs string) ([]string, error) {
 	}
 
 	// get information about all the pods running the ingress controller (gateway)
-	pods, err := s.client.CoreV1().Pods(ingressNamespace).List(metaV1.ListOptions{
-		// TODO: make it a const or maybe setting ( unless we remove k8s ingress support first)
-		LabelSelector: labels.SelectorFromSet(map[string]string{"app": "ingressgateway"}).String(),
-	})
+	pods, err := s.podLister.Pods(ingressNamespace).List(labels.SelectorFromSet(map[string]string{"app": "ingressgateway"}))
 	if err != nil {
 		return nil, err
 	}
 
-	for _, pod := range pods.Items {
+	for _, pod := range pods {
 		// only Running pods are valid
 		if pod.Status.Phase != coreV1.PodRunning {
 			continue
 		}
 
 		// Find node external IP
-		node, err := s.client.CoreV1().Nodes().Get(pod.Spec.NodeName, metaV1.GetOptions{})
+		node, err := s.nodeLister.Get(pod.Spec.NodeName)
 		if err != nil {
 			continue
 		}

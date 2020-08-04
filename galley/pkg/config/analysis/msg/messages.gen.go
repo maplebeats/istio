@@ -79,7 +79,7 @@ var (
 
 	// DeploymentAssociatedToMultipleServices defines a diag.MessageType for message "DeploymentAssociatedToMultipleServices".
 	// Description: The resulting pods of a service mesh deployment can't be associated with multiple services using the same port but different protocols.
-	DeploymentAssociatedToMultipleServices = diag.NewMessageType(diag.Warning, "IST0116", "This deployment is associated with multiple services using port %d but different protocols: %v")
+	DeploymentAssociatedToMultipleServices = diag.NewMessageType(diag.Warning, "IST0116", "This deployment %s is associated with multiple services using port %d but different protocols: %v")
 
 	// DeploymentRequiresServiceAssociated defines a diag.MessageType for message "DeploymentRequiresServiceAssociated".
 	// Description: The resulting pods of a service mesh deployment must be associated with at least one service.
@@ -100,6 +100,34 @@ var (
 	// MeshPolicyResourceIsDeprecated defines a diag.MessageType for message "MeshPolicyResourceIsDeprecated".
 	// Description: The MeshPolicy resource is deprecated and will be removed in a future Istio release. Migrate to the PeerAuthentication resource.
 	MeshPolicyResourceIsDeprecated = diag.NewMessageType(diag.Info, "IST0121", "The MeshPolicy resource is deprecated and will be removed in a future Istio release. Migrate to the PeerAuthentication resource.")
+
+	// InvalidRegexp defines a diag.MessageType for message "InvalidRegexp".
+	// Description: Invalid Regex
+	InvalidRegexp = diag.NewMessageType(diag.Warning, "IST0122", "Field %q regular expression invalid: %q (%s)")
+
+	// NamespaceMultipleInjectionLabels defines a diag.MessageType for message "NamespaceMultipleInjectionLabels".
+	// Description: A namespace has both new and legacy injection labels
+	NamespaceMultipleInjectionLabels = diag.NewMessageType(diag.Warning, "IST0123", "The namespace has both new and legacy injection labels. Run 'kubectl label namespace %s istio.io/rev-' or 'kubectl label namespace %s istio-injection-'")
+
+	// InvalidAnnotation defines a diag.MessageType for message "InvalidAnnotation".
+	// Description: An Istio annotation that is not valid
+	InvalidAnnotation = diag.NewMessageType(diag.Warning, "IST0125", "Invalid annotation %s: %s")
+
+	// UnknownMeshNetworksServiceRegistry defines a diag.MessageType for message "UnknownMeshNetworksServiceRegistry".
+	// Description: A service registry in Mesh Networks is unknown
+	UnknownMeshNetworksServiceRegistry = diag.NewMessageType(diag.Error, "IST0126", "Unknown service registry %s in network %s")
+
+	// NoMatchingWorkloadsFound defines a diag.MessageType for message "NoMatchingWorkloadsFound".
+	// Description: There aren't workloads matching the resource labels
+	NoMatchingWorkloadsFound = diag.NewMessageType(diag.Warning, "IST0127", "No matching workloads for this resource with the following labels: %s")
+
+	// NoServerCertificateVerificationDestinationLevel defines a diag.MessageType for message "NoServerCertificateVerificationDestinationLevel".
+	// Description: No caCertificates are set in DestinationRule, this results in no verification of presented server certificate.
+	NoServerCertificateVerificationDestinationLevel = diag.NewMessageType(diag.Error, "IST0128", "DestinationRule %s in namespace %s has TLS mode set to %s but no caCertificates are set to validate server identity for host: %s")
+
+	// NoServerCertificateVerificationPortLevel defines a diag.MessageType for message "NoServerCertificateVerificationPortLevel".
+	// Description: No caCertificates are set in DestinationRule, this results in no verification of presented server certificate for traffic to a given port.
+	NoServerCertificateVerificationPortLevel = diag.NewMessageType(diag.Error, "IST0129", "DestinationRule %s in namespace %s has TLS mode set to %s but no caCertificates are set to validate server identity for host: %s at port %s")
 )
 
 // All returns a list of all known message types.
@@ -128,6 +156,13 @@ func All() []*diag.MessageType {
 		JwtFailureDueToInvalidServicePortPrefix,
 		PolicyResourceIsDeprecated,
 		MeshPolicyResourceIsDeprecated,
+		InvalidRegexp,
+		NamespaceMultipleInjectionLabels,
+		InvalidAnnotation,
+		UnknownMeshNetworksServiceRegistry,
+		NoMatchingWorkloadsFound,
+		NoServerCertificateVerificationDestinationLevel,
+		NoServerCertificateVerificationPortLevel,
 	}
 }
 
@@ -354,5 +389,80 @@ func NewMeshPolicyResourceIsDeprecated(r *resource.Instance) diag.Message {
 	return diag.NewMessage(
 		MeshPolicyResourceIsDeprecated,
 		r,
+	)
+}
+
+// NewInvalidRegexp returns a new diag.Message based on InvalidRegexp.
+func NewInvalidRegexp(r *resource.Instance, where string, re string, problem string) diag.Message {
+	return diag.NewMessage(
+		InvalidRegexp,
+		r,
+		where,
+		re,
+		problem,
+	)
+}
+
+// NewNamespaceMultipleInjectionLabels returns a new diag.Message based on NamespaceMultipleInjectionLabels.
+func NewNamespaceMultipleInjectionLabels(r *resource.Instance, namespace string, namespace2 string) diag.Message {
+	return diag.NewMessage(
+		NamespaceMultipleInjectionLabels,
+		r,
+		namespace,
+		namespace2,
+	)
+}
+
+// NewInvalidAnnotation returns a new diag.Message based on InvalidAnnotation.
+func NewInvalidAnnotation(r *resource.Instance, annotation string, problem string) diag.Message {
+	return diag.NewMessage(
+		InvalidAnnotation,
+		r,
+		annotation,
+		problem,
+	)
+}
+
+// NewUnknownMeshNetworksServiceRegistry returns a new diag.Message based on UnknownMeshNetworksServiceRegistry.
+func NewUnknownMeshNetworksServiceRegistry(r *resource.Instance, serviceregistry string, network string) diag.Message {
+	return diag.NewMessage(
+		UnknownMeshNetworksServiceRegistry,
+		r,
+		serviceregistry,
+		network,
+	)
+}
+
+// NewNoMatchingWorkloadsFound returns a new diag.Message based on NoMatchingWorkloadsFound.
+func NewNoMatchingWorkloadsFound(r *resource.Instance, labels string) diag.Message {
+	return diag.NewMessage(
+		NoMatchingWorkloadsFound,
+		r,
+		labels,
+	)
+}
+
+// NewNoServerCertificateVerificationDestinationLevel returns a new diag.Message based on NoServerCertificateVerificationDestinationLevel.
+func NewNoServerCertificateVerificationDestinationLevel(r *resource.Instance, destinationrule string, namespace string, mode string, host string) diag.Message {
+	return diag.NewMessage(
+		NoServerCertificateVerificationDestinationLevel,
+		r,
+		destinationrule,
+		namespace,
+		mode,
+		host,
+	)
+}
+
+// NewNoServerCertificateVerificationPortLevel returns a new diag.Message based on NoServerCertificateVerificationPortLevel.
+func NewNoServerCertificateVerificationPortLevel(r *resource.Instance, destinationrule string, namespace string, mode string, host string, port string) diag.Message {
+	return diag.NewMessage(
+		NoServerCertificateVerificationPortLevel,
+		r,
+		destinationrule,
+		namespace,
+		mode,
+		host,
+		port,
 	)
 }

@@ -1,4 +1,4 @@
-//  Copyright 2018 Istio Authors
+//  Copyright Istio Authors
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
 //  you may not use this file except in compliance with the License.
@@ -17,8 +17,6 @@ package framework
 import (
 	"testing"
 
-	"istio.io/istio/pkg/test/framework/components/environment/api"
-	"istio.io/istio/pkg/test/framework/core"
 	"istio.io/istio/pkg/test/framework/label"
 	"istio.io/istio/pkg/test/framework/resource"
 )
@@ -31,7 +29,7 @@ type runtime struct {
 }
 
 // newRuntime returns a new runtime instance.
-func newRuntime(s *core.Settings, fn api.FactoryFn, labels label.Set) (*runtime, error) {
+func newRuntime(s *resource.Settings, fn resource.EnvironmentFactory, labels label.Set) (*runtime, error) {
 	ctx, err := newSuiteContext(s, fn, labels)
 	if err != nil {
 		return nil, err
@@ -52,7 +50,7 @@ func (i *runtime) suiteContext() *suiteContext {
 }
 
 // newRootContext creates and returns a new testContext with no parent.
-func (i *runtime) newRootContext(test *Test, goTest *testing.T, labels label.Set) *testContext {
+func (i *runtime) newRootContext(test *testImpl, goTest *testing.T, labels label.Set) *testContext {
 	return newTestContext(test, goTest, i.context, nil, labels)
 }
 

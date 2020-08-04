@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors. All Rights Reserved.
+// Copyright Istio Authors. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -74,7 +74,6 @@ func TestParseThreshold(t *testing.T) {
 	example2 :=
 		"#Some comments\n" +
 			"  # more comments\n" +
-			"istio.io/istio/mixer/pkg\n" +
 			" istio.io/istio/pilot/test\n" +
 			"\n"
 	outFile2 := filepath.Join(tmpDir, "outFile2")
@@ -93,9 +92,6 @@ func TestParseThreshold(t *testing.T) {
 			t.Error("Wrong result from parseThreshold()")
 		}
 		if thresholds["istio.io/istio/pilot"] != 20.2 {
-			t.Error("Wrong result from parseThreshold()")
-		}
-		if thresholds["istio.io/istio/mixer/pkg"] != 100 {
 			t.Error("Wrong result from parseThreshold()")
 		}
 		if thresholds["istio.io/istio/pilot/test"] != 100 {
@@ -117,9 +113,6 @@ func TestGetThreshold(t *testing.T) {
 		t.Error("Unexpected threshold")
 	}
 	if getThreshold(thresholds, "istio.io/istio/pilot/pkg/crd/foobar") != 40 {
-		t.Error("Unexpected threshold")
-	}
-	if getThreshold(thresholds, "istio.io/istio/mixer/pkg/crd/foobar") != 0 {
 		t.Error("Unexpected threshold")
 	}
 }

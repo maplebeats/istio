@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -27,7 +27,6 @@ import (
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/framework/components/echo"
 	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
-	"istio.io/istio/pkg/test/framework/components/environment"
 	"istio.io/istio/pkg/test/framework/components/namespace"
 	"istio.io/istio/pkg/test/util/file"
 	"istio.io/istio/pkg/test/util/retry"
@@ -38,7 +37,6 @@ import (
 func TestPassThroughFilterChain(t *testing.T) {
 	framework.
 		NewTest(t).
-		RequiresEnvironment(environment.Kube).
 		Run(func(ctx framework.TestContext) {
 			ns := namespace.NewOrFail(t, ctx, namespace.Config{
 				Prefix: "pass-through-filter-chain",
@@ -49,31 +47,44 @@ func TestPassThroughFilterChain(t *testing.T) {
 			}
 			policies := tmpl.EvaluateAllOrFail(t, args,
 				file.AsStringOrFail(t, "testdata/pass-through-filter-chain.yaml.tmpl"))
-			g.ApplyConfigOrFail(t, ns, policies...)
-			defer g.DeleteConfigOrFail(t, ns, policies...)
+			ctx.Config().ApplyYAMLOrFail(t, ns.Name(), policies...)
+			defer ctx.Config().DeleteYAMLOrFail(t, ns.Name(), policies...)
 
 			newEchoConfig := func(service string) echo.Config {
 				return echo.Config{
 					Service:   service,
 					Namespace: ns,
-					Galley:    g,
-					Pilot:     p,
+					Subsets:   []echo.SubsetConfig{{}},
 					Ports: []echo.Port{
 						{
 							Name:     "grpc",
 							Protocol: protocol.GRPC,
 						},
 					},
-					// The port 8085/8086 will be defined only in the workload and not in the k8s service.
-					WorkloadOnlyPorts: []int{
-						8085,
-						8086,
+					// The port 8085,8086,8087,8088 will be defined only in the workload and not in the k8s service.
+					WorkloadOnlyPorts: []echo.WorkloadPort{
+						{
+							Port:     8085,
+							Protocol: protocol.HTTP,
+						},
+						{
+							Port:     8086,
+							Protocol: protocol.HTTP,
+						},
+						{
+							Port:     8087,
+							Protocol: protocol.TCP,
+						},
+						{
+							Port:     8088,
+							Protocol: protocol.TCP,
+						},
 					},
 				}
 			}
 
 			var x, a, b, c, d echo.Instance
-			echoboot.NewBuilderOrFail(t, ctx).
+			echoboot.NewBuilder(ctx).
 				With(&x, newEchoConfig("x")).
 				With(&a, newEchoConfig("a")).
 				With(&b, newEchoConfig("b")).
@@ -84,6 +95,7 @@ func TestPassThroughFilterChain(t *testing.T) {
 			cases := []struct {
 				target echo.Instance
 				port   int
+				schema protocol.Instance
 				want   bool
 			}{
 				// For workload a, there is no authN/authZ policy.
@@ -92,24 +104,52 @@ func TestPassThroughFilterChain(t *testing.T) {
 				{
 					target: a,
 					port:   8085,
+					schema: protocol.HTTP,
 					want:   true,
 				},
 				{
 					target: a,
 					port:   8086,
+					schema: protocol.HTTP,
+					want:   true,
+				},
+				{
+					target: a,
+					port:   8087,
+					schema: protocol.TCP,
+					want:   true,
+				},
+				{
+					target: a,
+					port:   8088,
+					schema: protocol.TCP,
 					want:   true,
 				},
 
-				// For workload b, there is only authZ policy that allows access to port 8085.
-				// Only request to port 8085 should be allowed.
+				// For workload b, there is only authZ policy that allows access to port 8085 and 8087.
+				// Only request to port 8085, 8087 should be allowed.
 				{
 					target: b,
 					port:   8085,
+					schema: protocol.HTTP,
 					want:   true,
 				},
 				{
 					target: b,
 					port:   8086,
+					schema: protocol.HTTP,
+					want:   false,
+				},
+				{
+					target: b,
+					port:   8087,
+					schema: protocol.TCP,
+					want:   true,
+				},
+				{
+					target: b,
+					port:   8088,
+					schema: protocol.TCP,
 					want:   false,
 				},
 
@@ -118,11 +158,25 @@ func TestPassThroughFilterChain(t *testing.T) {
 				{
 					target: c,
 					port:   8085,
+					schema: protocol.HTTP,
 					want:   false,
 				},
 				{
 					target: c,
 					port:   8086,
+					schema: protocol.HTTP,
+					want:   false,
+				},
+				{
+					target: c,
+					port:   8087,
+					schema: protocol.TCP,
+					want:   false,
+				},
+				{
+					target: c,
+					port:   8088,
+					schema: protocol.TCP,
 					want:   false,
 				},
 
@@ -131,11 +185,25 @@ func TestPassThroughFilterChain(t *testing.T) {
 				{
 					target: d,
 					port:   8085,
+					schema: protocol.HTTP,
 					want:   true,
 				},
 				{
 					target: d,
 					port:   8086,
+					schema: protocol.HTTP,
+					want:   true,
+				},
+				{
+					target: d,
+					port:   8087,
+					schema: protocol.TCP,
+					want:   true,
+				},
+				{
+					target: d,
+					port:   8088,
+					schema: protocol.TCP,
 					want:   true,
 				},
 			}
@@ -146,8 +214,9 @@ func TestPassThroughFilterChain(t *testing.T) {
 				// The request should be handled by the pass through filter chain.
 				host := fmt.Sprintf("%s:%d", getWorkload(tc.target, t).Address(), tc.port)
 				request := &epb.ForwardEchoRequest{
-					Url:   fmt.Sprintf("http://%s/", host),
-					Count: 1,
+					Url:     fmt.Sprintf("%s://%s", tc.schema, host),
+					Count:   1,
+					Message: "HelloWorld",
 					Headers: []*epb.Header{
 						{
 							Key:   "Host",
@@ -165,13 +234,18 @@ func TestPassThroughFilterChain(t *testing.T) {
 							if len(responses) < 1 {
 								return fmt.Errorf("received no responses from request to %s", host)
 							}
-							if response.StatusCodeOK != responses[0].Code {
+							if tc.schema == protocol.HTTP && response.StatusCodeOK != responses[0].Code {
 								return fmt.Errorf("want status %s but got %s", response.StatusCodeOK, responses[0].Code)
 							}
-						} else if err == nil || !strings.Contains(err.Error(), "EOF") {
-							// The request should always be rejected in TCP level because we currently do not support
-							// HTTP filters in pass through filter chains.
-							return fmt.Errorf("want error EOF but got: %v", err)
+						} else {
+							// Check HTTP forbidden response
+							if len(responses) >= 1 && response.StatusCodeForbidden == responses[0].Code {
+								return nil
+							}
+
+							if err == nil || !strings.Contains(err.Error(), "EOF") {
+								return fmt.Errorf("want error EOF but got: %v", err)
+							}
 						}
 						return nil
 					}, retry.Delay(250*time.Millisecond), retry.Timeout(30*time.Second))
@@ -183,7 +257,7 @@ func TestPassThroughFilterChain(t *testing.T) {
 func getWorkload(instance echo.Instance, t *testing.T) echo.Workload {
 	workloads, err := instance.Workloads()
 	if err != nil {
-		t.Fatalf(fmt.Sprintf("failed to get workloads: %v", err))
+		t.Fatalf(fmt.Sprintf("failed to get Subsets: %v", err))
 	}
 	if len(workloads) < 1 {
 		t.Fatalf("want at least 1 workload but found 0")

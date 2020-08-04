@@ -11,16 +11,21 @@ about: Report a bug to help us improve Istio
 
 **Affected product area (please put an X in all that apply)**
 
-[ ] Configuration Infrastructure
 [ ] Docs
 [ ] Installation
 [ ] Networking
 [ ] Performance and Scalability
-[ ] Policies and Telemetry
+[ ] Extensions and Telemetry
 [ ] Security
 [ ] Test and Release
 [ ] User Experience
 [ ] Developer Infrastructure
+
+**Affected features (please put an X in all that apply)**
+
+[ ] Multi Cluster
+[ ] Virtual Machine
+[ ] Multi Control Plane
 
 **Expected behavior**
 

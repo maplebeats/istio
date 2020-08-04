@@ -9,9 +9,13 @@ spec:
   template:
     metadata:
       annotations:
+        prometheus.io/path: /stats/prometheus
+        prometheus.io/port: "15020"
+        prometheus.io/scrape: "true"
         sidecar.istio.io/status: '{"version":"unit-test-fake-version","initContainers":["istio-init"],"containers":["istio-proxy"],"volumes":["istio-envoy"],"imagePullSecrets":null}'
       creationTimestamp: null
       labels:
+        istio.io/rev: ""
         security.istio.io/tlsMode: istio
         service.istio.io/canonical-name: pi
         service.istio.io/canonical-revision: latest
@@ -35,10 +39,7 @@ spec:
         - pi.default
         - --proxyLogLevel=warning
         - --proxyComponentLogLevel=misc:error
-        - --statusPort
-        - "15020"
         - --trust-domain=cluster.local
-        - --controlPlaneBootstrap=false
         - --concurrency
         - "2"
         env:
@@ -46,8 +47,6 @@ spec:
           value: third-party-jwt
         - name: PILOT_CERT_PROVIDER
           value: istiod
-        - name: CA_ADDR
-          value: istiod.istio-system.svc:15012
         - name: POD_NAME
           valueFrom:
             fieldRef:
@@ -68,23 +67,25 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: status.hostIP
-        - name: MESH_CONFIG
+        - name: CANONICAL_SERVICE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.labels['service.istio.io/canonical-name']
+        - name: CANONICAL_REVISION
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.labels['service.istio.io/canonical-revision']
+        - name: PROXY_CONFIG
           value: |
             {}
         - name: ISTIO_META_POD_PORTS
           value: |-
             [
             ]
+        - name: ISTIO_META_APP_CONTAINERS
+          value: pi
         - name: ISTIO_META_CLUSTER_ID
           value: Kubernetes
-        - name: ISTIO_META_POD_NAME
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.name
-        - name: ISTIO_META_CONFIG_NAMESPACE
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.namespace
         - name: ISTIO_META_INTERCEPTION_MODE
           value: REDIRECT
         - name: ISTIO_META_WORKLOAD_NAME
@@ -93,6 +94,8 @@ spec:
           value: kubernetes://apis/v1/namespaces/default/pods/pi
         - name: ISTIO_META_MESH_ID
           value: cluster.local
+        - name: ISTIO_KUBE_APP_PROBERS
+          value: '{}'
         image: gcr.io/istio-release/proxyv2:master-latest-daily
         imagePullPolicy: Always
         name: istio-proxy
@@ -104,7 +107,7 @@ spec:
           failureThreshold: 30
           httpGet:
             path: /healthz/ready
-            port: 15020
+            port: 15021
           initialDelaySeconds: 1
           periodSeconds: 2
         resources:
@@ -127,14 +130,16 @@ spec:
         volumeMounts:
         - mountPath: /var/run/secrets/istio
           name: istiod-ca-cert
+        - mountPath: /var/lib/istio/data
+          name: istio-data
         - mountPath: /etc/istio/proxy
           name: istio-envoy
         - mountPath: /var/run/secrets/tokens
           name: istio-token
         - mountPath: /etc/istio/pod
-          name: podinfo
+          name: istio-podinfo
       initContainers:
-      - command:
+      - args:
         - istio-iptables
         - -p
         - "15001"
@@ -151,14 +156,14 @@ spec:
         - -b
         - '*'
         - -d
-        - 15090,15020
+        - 15090,15021,15020
         image: gcr.io/istio-release/proxy_init:master-latest-daily
         imagePullPolicy: Always
         name: istio-init
         resources:
           limits:
-            cpu: 100m
-            memory: 50Mi
+            cpu: "2"
+            memory: 1Gi
           requests:
             cpu: 10m
             memory: 10Mi
@@ -176,10 +181,14 @@ spec:
           runAsNonRoot: false
           runAsUser: 0
       restartPolicy: Never
+      securityContext:
+        fsGroup: 1337
       volumes:
       - emptyDir:
           medium: Memory
         name: istio-envoy
+      - emptyDir: {}
+        name: istio-data
       - downwardAPI:
           items:
           - fieldRef:
@@ -188,7 +197,7 @@ spec:
           - fieldRef:
               fieldPath: metadata.annotations
             path: annotations
-        name: podinfo
+        name: istio-podinfo
       - name: istio-token
         projected:
           sources:

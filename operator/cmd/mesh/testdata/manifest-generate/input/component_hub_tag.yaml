@@ -7,8 +7,9 @@ spec:
     pilot:
       enabled: true
       hub: component.pilot.hub
-      tag: component.pilot.tag
+      tag: 2
     cni:
       enabled: true
       hub: component.cni.hub
-      tag: component.cni.tag
+      tag: v3.3.3
+

@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,8 +15,6 @@
 package factory
 
 import (
-	"istio.io/api/authentication/v1alpha1"
-
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/security/authn"
 	"istio.io/istio/pilot/pkg/security/authn/v1beta1"
@@ -25,17 +23,9 @@ import (
 
 // NewPolicyApplier returns the appropriate (policy) applier, depends on the versions of the policy exists
 // for the given service instance.
-func NewPolicyApplier(push *model.PushContext,
-	serviceInstance *model.ServiceInstance, namespace string, labels labels.Collection) authn.PolicyApplier {
-	var authnPolicy *v1alpha1.Policy
-	if serviceInstance != nil {
-		service := serviceInstance.Service
-		port := serviceInstance.ServicePort
-		authnPolicy, _ = push.AuthenticationPolicyForWorkload(service, port)
-	}
+func NewPolicyApplier(push *model.PushContext, namespace string, labels labels.Collection) authn.PolicyApplier {
 	return v1beta1.NewPolicyApplier(
 		push.AuthnBetaPolicies.GetRootNamespace(),
 		push.AuthnBetaPolicies.GetJwtPoliciesForWorkload(namespace, labels),
-		push.AuthnBetaPolicies.GetPeerAuthenticationsForWorkload(namespace, labels),
-		authnPolicy)
+		push.AuthnBetaPolicies.GetPeerAuthenticationsForWorkload(namespace, labels))
 }

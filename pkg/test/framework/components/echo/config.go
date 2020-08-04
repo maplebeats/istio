@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,9 +18,9 @@ import (
 	"fmt"
 	"time"
 
-	"istio.io/istio/pkg/test/framework/components/galley"
+	"istio.io/istio/pkg/test/echo/common"
 	"istio.io/istio/pkg/test/framework/components/namespace"
-	"istio.io/istio/pkg/test/framework/components/pilot"
+	"istio.io/istio/pkg/test/framework/resource"
 )
 
 // Config defines the options for creating an Echo component.
@@ -31,12 +31,6 @@ type Config struct {
 
 	// Domain of the echo Instance. If not provided, a default will be selected.
 	Domain string
-
-	// Galley component (may be required, depending on the environment/configuration).
-	Galley galley.Instance
-
-	// Pilot component reference (may be required, depending on the environment/configuration).
-	Pilot pilot.Instance
 
 	// Service indicates the service name of the Echo application.
 	Service string
@@ -60,18 +54,43 @@ type Config struct {
 
 	// WorkloadOnlyPorts for ports only defined in the workload but not in the k8s service.
 	// This is used to test the inbound pass-through filter chain.
-	WorkloadOnlyPorts []int
+	WorkloadOnlyPorts []WorkloadPort
 
-	// Annotations provides metadata hints for deployment of the instance.
-	Annotations Annotations
-
-	// IncludeInboundPorts provides the ports that inbound listener should capture
-	// "*" means capture all.
-	IncludeInboundPorts string
+	// ServiceAnnotations is annotations on service object.
+	ServiceAnnotations Annotations
 
 	// ReadinessTimeout specifies the timeout that we wait the application to
 	// become ready.
 	ReadinessTimeout time.Duration
+
+	// Subsets contains the list of Subsets config belonging to this echo
+	// service instance.
+	Subsets []SubsetConfig
+
+	// Cluster to be used in a multicluster environment
+	Cluster resource.Cluster
+
+	// TLS settings for echo server
+	TLSSettings *common.TLSSettings
+
+	// If enabled, echo will be deployed as a "VM". This means it will run Envoy in the same pod as echo,
+	// disable sidecar injection, etc.
+	DeployAsVM bool
+
+	// The image name to be used to pull the image for the VM. `DeployAsVM` must be enabled.
+	VMImage string
+
+	// The set of environment variables to set for `DeployAsVM` instances.
+	VMEnvironment map[string]string
+}
+
+// SubsetConfig is the config for a group of Subsets (e.g. Kubernetes deployment).
+type SubsetConfig struct {
+	// The version of the deployment.
+	Version string
+	// Annotations provides metadata hints for deployment of the instance.
+	Annotations Annotations
+	// TODO: port more into workload config.
 }
 
 // String implements the Configuration interface (which implements fmt.Stringer)

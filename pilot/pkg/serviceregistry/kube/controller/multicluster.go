@@ -1,4 +1,4 @@
-// Copyright 2018 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,96 +15,148 @@
 package controller
 
 import (
+	"strings"
 	"sync"
 	"time"
 
-	"k8s.io/client-go/kubernetes"
-
 	"istio.io/pkg/log"
+
+	"istio.io/istio/pilot/pkg/features"
+	kubelib "istio.io/istio/pkg/kube"
+	"istio.io/istio/pkg/webhooks"
+
+	"k8s.io/client-go/kubernetes"
 
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/serviceregistry/aggregate"
 	"istio.io/istio/pkg/config/mesh"
-	"istio.io/istio/pkg/config/schema/collections"
-	"istio.io/istio/pkg/config/schema/resource"
+	"istio.io/istio/pkg/config/schema/gvk"
 	"istio.io/istio/pkg/kube/secretcontroller"
 )
 
+const (
+	// Name of the webhook config in the config - no need to change it.
+	webhookName = "sidecar-injector.istio.io"
+)
+
+var (
+	validationWebhookConfigNameTemplateVar = "${namespace}"
+	// These should be an invalid DNS-1123 label to ensure the user
+	// doesn't specific a valid name that matches out template.
+	validationWebhookConfigNameTemplate = "istiod-" + validationWebhookConfigNameTemplateVar
+)
+
 type kubeController struct {
-	rc     *Controller
+	*Controller
 	stopCh chan struct{}
 }
 
 // Multicluster structure holds the remote kube Controllers and multicluster specific attributes.
 type Multicluster struct {
-	WatchedNamespace  string
+	WatchedNamespaces string
 	DomainSuffix      string
 	ResyncPeriod      time.Duration
 	serviceController *aggregate.Controller
 	XDSUpdater        model.XDSUpdater
+	metrics           model.Metrics
 
 	m                     sync.Mutex // protects remoteKubeControllers
 	remoteKubeControllers map[string]*kubeController
 	networksWatcher       mesh.NetworksWatcher
+
+	// fetchCaRoot maps the certificate name to the certificate
+	fetchCaRoot     func() map[string]string
+	caBundlePath    string
+	secretNamespace string
 }
 
 // NewMulticluster initializes data structure to store multicluster information
 // It also starts the secret controller
-func NewMulticluster(kc kubernetes.Interface, secretNamespace string,
-	watchedNamespace string, domainSuffix string, resyncPeriod time.Duration,
+func NewMulticluster(kc kubernetes.Interface, secretNamespace string, opts Options,
 	serviceController *aggregate.Controller, xds model.XDSUpdater, networksWatcher mesh.NetworksWatcher) (*Multicluster, error) {
 
 	remoteKubeController := make(map[string]*kubeController)
-	if resyncPeriod == 0 {
+	if opts.ResyncPeriod == 0 {
 		// make sure a resync time of 0 wasn't passed in.
-		resyncPeriod = 30 * time.Second
+		opts.ResyncPeriod = 30 * time.Second
 		log.Info("Resync time was configured to 0, resetting to 30")
 	}
 	mc := &Multicluster{
-		WatchedNamespace:      watchedNamespace,
-		DomainSuffix:          domainSuffix,
-		ResyncPeriod:          resyncPeriod,
+		WatchedNamespaces:     opts.WatchedNamespaces,
+		DomainSuffix:          opts.DomainSuffix,
+		ResyncPeriod:          opts.ResyncPeriod,
 		serviceController:     serviceController,
 		XDSUpdater:            xds,
 		remoteKubeControllers: remoteKubeController,
 		networksWatcher:       networksWatcher,
+		metrics:               opts.Metrics,
+		fetchCaRoot:           opts.FetchCaRoot,
+		caBundlePath:          opts.CABundlePath,
+		secretNamespace:       secretNamespace,
 	}
 
-	err := secretcontroller.StartSecretController(kc,
+	_ = secretcontroller.StartSecretController(
+		kc,
 		mc.AddMemberCluster,
+		mc.UpdateMemberCluster,
 		mc.DeleteMemberCluster,
 		secretNamespace)
-	return mc, err
+	return mc, nil
 }
 
 // AddMemberCluster is passed to the secret controller as a callback to be called
 // when a remote cluster is added.  This function needs to set up all the handlers
 // to watch for resources being added, deleted or changed on remote clusters.
-func (m *Multicluster) AddMemberCluster(clientset kubernetes.Interface, clusterID string) error {
+func (m *Multicluster) AddMemberCluster(clients kubelib.Client, clusterID string) error {
 	// stopCh to stop controller created here when cluster removed.
 	stopCh := make(chan struct{})
 	var remoteKubeController kubeController
 	remoteKubeController.stopCh = stopCh
 	m.m.Lock()
-	kubectl := NewController(clientset, Options{
-		WatchedNamespace: m.WatchedNamespace,
-		ResyncPeriod:     m.ResyncPeriod,
-		DomainSuffix:     m.DomainSuffix,
-		XDSUpdater:       m.XDSUpdater,
-		ClusterID:        clusterID,
-		NetworksWatcher:  m.networksWatcher,
-	})
+	options := Options{
+		WatchedNamespaces: m.WatchedNamespaces,
+		ResyncPeriod:      m.ResyncPeriod,
+		DomainSuffix:      m.DomainSuffix,
+		XDSUpdater:        m.XDSUpdater,
+		ClusterID:         clusterID,
+		NetworksWatcher:   m.networksWatcher,
+		Metrics:           m.metrics,
+	}
+	log.Infof("Initializing Kubernetes service registry %q", options.ClusterID)
+	kubectl := NewController(clients, options)
 
-	remoteKubeController.rc = kubectl
+	remoteKubeController.Controller = kubectl
 	m.serviceController.AddRegistry(kubectl)
 
 	m.remoteKubeControllers[clusterID] = &remoteKubeController
 	m.m.Unlock()
 
-	_ = kubectl.AppendServiceHandler(func(*model.Service, model.Event) { m.updateHandler() })
-	_ = kubectl.AppendInstanceHandler(func(*model.ServiceInstance, model.Event) { m.updateHandler() })
+	// Only need to add service handler for kubernetes registry as `initRegistryEventHandlers`,
+	// because when endpoints update `XDSUpdater.EDSUpdate` has already been called.
+	_ = kubectl.AppendServiceHandler(func(svc *model.Service, ev model.Event) { m.updateHandler(svc) })
+
 	go kubectl.Run(stopCh)
+	webhookConfigName := strings.ReplaceAll(validationWebhookConfigNameTemplate, validationWebhookConfigNameTemplateVar, m.secretNamespace)
+	if m.fetchCaRoot != nil {
+		nc := NewNamespaceController(m.fetchCaRoot, clients)
+		go nc.Run(stopCh)
+		go webhooks.PatchCertLoop(features.InjectionWebhookConfigName.Get(), webhookName, m.caBundlePath, clients.Kube(), stopCh)
+		valicationWebhookController := webhooks.CreateValidationWebhookController(clients, webhookConfigName,
+			m.secretNamespace, m.caBundlePath, true)
+		if valicationWebhookController != nil {
+			go valicationWebhookController.Start(stopCh)
+		}
+	}
+
+	clients.RunAndWait(stopCh)
 	return nil
+}
+
+func (m *Multicluster) UpdateMemberCluster(clients kubelib.Client, clusterID string) error {
+	if err := m.DeleteMemberCluster(clusterID); err != nil {
+		return err
+	}
+	return m.AddMemberCluster(clients, clusterID)
 }
 
 // DeleteMemberCluster is passed to the secret controller as a callback to be called
@@ -128,13 +180,26 @@ func (m *Multicluster) DeleteMemberCluster(clusterID string) error {
 	return nil
 }
 
-func (m *Multicluster) updateHandler() {
+func (m *Multicluster) updateHandler(svc *model.Service) {
 	if m.XDSUpdater != nil {
 		req := &model.PushRequest{
-			Full:               true,
-			ConfigTypesUpdated: map[resource.GroupVersionKind]struct{}{collections.IstioNetworkingV1Alpha3Serviceentries.Resource().GroupVersionKind(): {}},
-			Reason:             []model.TriggerReason{model.UnknownTrigger},
+			Full: true,
+			ConfigsUpdated: map[model.ConfigKey]struct{}{{
+				Kind:      gvk.ServiceEntry,
+				Name:      string(svc.Hostname),
+				Namespace: svc.Attributes.Namespace,
+			}: {}},
+			Reason: []model.TriggerReason{model.UnknownTrigger},
 		}
 		m.XDSUpdater.ConfigUpdate(req)
 	}
+}
+
+func (m *Multicluster) GetRemoteKubeClient(clusterID string) kubernetes.Interface {
+	m.m.Lock()
+	defer m.m.Unlock()
+	if c := m.remoteKubeControllers[clusterID]; c != nil {
+		return c.client
+	}
+	return nil
 }

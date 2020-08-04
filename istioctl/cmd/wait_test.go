@@ -1,4 +1,4 @@
-// Copyright 2017 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,11 +25,11 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/fake"
 
-	v2 "istio.io/istio/pilot/pkg/proxy/envoy/v2"
+	"istio.io/istio/pilot/pkg/xds"
 )
 
 func TestWaitCmd(t *testing.T) {
-	cannedResponseObj := []v2.SyncedVersions{
+	cannedResponseObj := []xds.SyncedVersions{
 		{
 			ProxyID:         "foo",
 			ClusterVersion:  "1",
@@ -70,6 +70,11 @@ func TestWaitCmd(t *testing.T) {
 		{
 			execClientConfig: cannedResponseMap,
 			args:             strings.Split("x wait --timeout 2s virtualservice foo.default", " "),
+			wantException:    false,
+		},
+		{
+			execClientConfig: cannedResponseMap,
+			args:             strings.Split("x wait --revision canary virtualservice foo.default", " "),
 			wantException:    false,
 		},
 	}

@@ -1,4 +1,4 @@
-// Copyright 2020 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,10 +16,11 @@ package proxycachedststoken
 
 import (
 	"testing"
+	"time"
 
 	"github.com/onsi/gomega"
 
-	testID "istio.io/istio/mixer/test/client/env"
+	testID "istio.io/istio/pkg/test/env"
 	xdsService "istio.io/istio/security/pkg/stsservice/mock"
 	stsTest "istio.io/istio/security/pkg/stsservice/test"
 )
@@ -48,10 +49,10 @@ func TestProxyCachedToken(t *testing.T) {
 	initialNumFederatedTokenCall := setup.AuthServer.NumGetFederatedTokenCalls()
 	initialNumAccessTokenCall := setup.AuthServer.NumGetAccessTokenCalls()
 	setup.StartProxy(t)
-	setup.ProxySetup.WaitEnvoyReady()
 	// Verify that proxy re-connects XDS server after each stream close, and the
 	// same token is received.
-	g.Expect(cb.NumStream()).To(gomega.Equal(numCloseStream + 1))
+	gomega.SetDefaultEventuallyTimeout(10 * time.Second)
+	g.Eventually(func() int { return cb.NumStream() }).Should(gomega.Equal(numCloseStream + 1)) // nolint:gocritic
 	g.Expect(cb.NumTokenReceived()).To(gomega.Equal(1))
 	// Verify there is only one extra call for each token.
 	g.Expect(setup.AuthServer.NumGetFederatedTokenCalls()).To(gomega.Equal(initialNumFederatedTokenCall + 1))

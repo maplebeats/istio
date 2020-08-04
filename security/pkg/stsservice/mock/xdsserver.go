@@ -1,4 +1,4 @@
-// Copyright 2020 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,21 +25,23 @@ import (
 	"testing"
 	"time"
 
+	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/cache/v3"
+
 	"istio.io/pkg/log"
 
-	api "github.com/envoyproxy/go-control-plane/envoy/api/v2"
-	core "github.com/envoyproxy/go-control-plane/envoy/api/v2/core"
-	listener "github.com/envoyproxy/go-control-plane/envoy/api/v2/listener"
-	route "github.com/envoyproxy/go-control-plane/envoy/api/v2/route"
-	hcm "github.com/envoyproxy/go-control-plane/envoy/config/filter/network/http_connection_manager/v2"
-	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v2"
-	"github.com/envoyproxy/go-control-plane/pkg/cache"
-	"github.com/envoyproxy/go-control-plane/pkg/conversion"
-	xds "github.com/envoyproxy/go-control-plane/pkg/server"
+	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
+	xds "github.com/envoyproxy/go-control-plane/pkg/server/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
+
+	"istio.io/istio/pilot/pkg/networking/util"
 )
 
 var xdsServerLog = log.RegisterScope("xdsServer", "XDS service debugging", 0)
@@ -54,12 +56,12 @@ type DynamicListener struct {
 	Port int
 }
 
-func (l *DynamicListener) makeListener() *api.Listener {
+func (l *DynamicListener) makeListener() *listener.Listener {
 	manager := &hcm.HttpConnectionManager{
 		CodecType:  hcm.HttpConnectionManager_AUTO,
 		StatPrefix: "http",
 		RouteSpecifier: &hcm.HttpConnectionManager_RouteConfig{
-			RouteConfig: &api.RouteConfiguration{
+			RouteConfig: &route.RouteConfiguration{
 				Name: "testListener",
 				VirtualHosts: []*route.VirtualHost{{
 					Name:    "backend",
@@ -75,12 +77,7 @@ func (l *DynamicListener) makeListener() *api.Listener {
 		}},
 	}
 
-	hTTPConnectionManager, err := conversion.MessageToStruct(manager)
-	if err != nil {
-		panic(err)
-	}
-
-	return &api.Listener{
+	return &listener.Listener{
 		Name: strconv.Itoa(l.Port),
 		Address: &core.Address{Address: &core.Address_SocketAddress{SocketAddress: &core.SocketAddress{
 			Address:       "127.0.0.1",
@@ -88,7 +85,7 @@ func (l *DynamicListener) makeListener() *api.Listener {
 		FilterChains: []*listener.FilterChain{{
 			Filters: []*listener.Filter{{
 				Name:       wellknown.HTTPConnectionManager,
-				ConfigType: &listener.Filter_Config{Config: hTTPConnectionManager},
+				ConfigType: &listener.Filter_TypedConfig{TypedConfig: util.MessageToAny(manager)},
 			}},
 		}},
 	}
@@ -131,7 +128,7 @@ func StartXDSServer(conf XDSConf, cb *XDSCallbacks, ls *DynamicListener, isTLS b
 	xdsServerLog.Infof("%s xDS server listens on %s", time.Now().String(), lis.Addr().String())
 	discovery.RegisterAggregatedDiscoveryServiceServer(gRPCServer, server)
 	snapshot := cache.Snapshot{}
-	snapshot.Resources[cache.Listener] = cache.Resources{Version: time.Now().String(), Items: map[string]cache.Resource{
+	snapshot.Resources[types.Listener] = cache.Resources{Version: time.Now().String(), Items: map[string]types.Resource{
 		"backend": ls.makeListener()}}
 	_ = snapshotCache.SetSnapshot("", snapshot)
 	go func() {
@@ -142,6 +139,7 @@ func StartXDSServer(conf XDSConf, cb *XDSCallbacks, ls *DynamicListener, isTLS b
 
 type XDSCallbacks struct {
 	numStream        int
+	numReq           int
 	numTokenReceived int
 
 	callbackError     bool
@@ -218,12 +216,7 @@ func (c *XDSCallbacks) OnStreamOpen(ctx context.Context, id int64, url string) e
 				c.t.Errorf("xDS stream (id: %d, url: %s) sent a token that does "+
 					"not match expected token (%s vs %s)", id, url, h[0], c.expectedToken)
 			} else {
-				c.t.Logf("xDS stream (id: %d, url: %s) has valid token: %v", id, url, h[0])
-			}
-			if c.numStream <= c.numStreamClose {
-				time.Sleep(c.streamDuration)
-				c.t.Logf("force close %d/%d xDS stream (id: %d, url: %s)", c.numStream, c.numStreamClose, id, url)
-				return fmt.Errorf("force to close the stream (id: %d, url: %s)", id, url)
+				xdsServerLog.Infof("xDS stream (id: %d, url: %s) has valid token: %v", id, url, h[0])
 			}
 		} else {
 			c.t.Errorf("XDS stream (id: %d, url: %s) does not have token in metadata %+v",
@@ -241,17 +234,29 @@ func (c *XDSCallbacks) OnStreamOpen(ctx context.Context, id int64, url string) e
 func (c *XDSCallbacks) OnStreamClosed(id int64) {
 	xdsServerLog.Infof("xDS stream (id: %d) is closed", id)
 }
-func (c *XDSCallbacks) OnStreamRequest(id int64, _ *api.DiscoveryRequest) error {
+func (c *XDSCallbacks) OnStreamRequest(id int64, _ *discovery.DiscoveryRequest) error {
 	xdsServerLog.Infof("receive xDS request (id: %d)", id)
+
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.numReq++
+
+	// Send out the first response to finish Envoy initialization, and close stream
+	// in followup requests.
+	if c.numReq > 1 && c.numStream <= c.numStreamClose {
+		time.Sleep(c.streamDuration)
+		xdsServerLog.Infof("force close %d/%d xDS stream (id: %d)", c.numStream, c.numStreamClose, id)
+		return fmt.Errorf("force to close the stream (id: %d)", id)
+	}
 	return nil
 }
-func (c *XDSCallbacks) OnStreamResponse(id int64, _ *api.DiscoveryRequest, _ *api.DiscoveryResponse) {
+func (c *XDSCallbacks) OnStreamResponse(id int64, _ *discovery.DiscoveryRequest, _ *discovery.DiscoveryResponse) {
 	xdsServerLog.Infof("on stream %d response", id)
 }
-func (c *XDSCallbacks) OnFetchRequest(context.Context, *api.DiscoveryRequest) error {
+func (c *XDSCallbacks) OnFetchRequest(context.Context, *discovery.DiscoveryRequest) error {
 	xdsServerLog.Infof("on fetch request")
 	return nil
 }
-func (c *XDSCallbacks) OnFetchResponse(*api.DiscoveryRequest, *api.DiscoveryResponse) {
+func (c *XDSCallbacks) OnFetchResponse(*discovery.DiscoveryRequest, *discovery.DiscoveryResponse) {
 	xdsServerLog.Infof("on fetch response")
 }

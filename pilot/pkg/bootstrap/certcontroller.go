@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,6 +23,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"istio.io/istio/pilot/pkg/serviceregistry/kube/controller"
 
 	"istio.io/pkg/log"
 
@@ -83,7 +85,7 @@ func (s *Server) initCertController(args *PilotArgs) error {
 	// Provision and manage the certificates for non-Pilot services.
 	// If services are empty, the certificate controller will do nothing.
 	s.certController, err = chiron.NewWebhookController(defaultCertGracePeriodRatio, defaultMinCertGracePeriod,
-		k8sClient.CoreV1(), k8sClient.AdmissionregistrationV1beta1(), k8sClient.CertificatesV1beta1(),
+		k8sClient.CoreV1(), k8sClient.AdmissionregistrationV1(), k8sClient.CertificatesV1beta1(),
 		defaultCACertPath, secretNames, dnsNames, namespaces)
 	if err != nil {
 		return fmt.Errorf("failed to create certificate controller: %v", err)
@@ -110,28 +112,46 @@ func (s *Server) initCertController(args *PilotArgs) error {
 //
 // TODO: If the discovery address in mesh.yaml is set to port 15012 (XDS-with-DNS-certs) and the name
 // matches the k8s namespace, failure to start DNS server is a fatal error.
-func (s *Server) initDNSCerts(hostname string) error {
+func (s *Server) initDNSCerts(hostname, customHost, namespace string) error {
+	// Name in the Istiod cert - support the old service names as well.
+	// validate hostname contains namespace
 	parts := strings.Split(hostname, ".")
-	if len(parts) < 2 {
-		return fmt.Errorf("invalid hostname %s, should contain at least service name and namespace", hostname)
+	hostnamePrefix := parts[0]
+
+	// append custom hostname if there is any
+	names := []string{hostname}
+	if customHost != "" && customHost != hostname {
+		log.Infof("Adding custom hostname %s", customHost)
+		names = append(names, customHost)
 	}
-	// Names in the Istiod cert - support the old service names as well.
+
 	// The first is the recommended one, also used by Apiserver for webhooks.
-	names := []string{hostname, "istiod.istio-system.svc", "istio-pilot.istio-system.svc"}
+	// add a few known hostnames
+	for _, altName := range []string{"istiod", "istiod-remote", "istio-pilot"} {
+		name := fmt.Sprintf("%v.%v.svc", altName, namespace)
+		if name == hostname || name == customHost {
+			continue
+		}
+		names = append(names, name)
+	}
 
 	var certChain, keyPEM []byte
 	var err error
 	if features.PilotCertProvider.Get() == KubernetesCAProvider {
 		log.Infof("Generating K8S-signed cert for %v", names)
 		certChain, keyPEM, _, err = chiron.GenKeyCertK8sCA(s.kubeClient.CertificatesV1beta1().CertificateSigningRequests(),
-			strings.Join(names, ","), parts[0]+".csr.secret", parts[1], defaultCACertPath)
-	} else if features.PilotCertProvider.Get() == IstiodCAProvider {
-		log.Infof("Generating Citadel-signed cert for %v", names)
-		certChain, keyPEM, err = s.ca.GenKeyCert(names, SelfSignedCACertTTL.Get())
+			strings.Join(names, ","), hostnamePrefix+".csr.secret", namespace, defaultCACertPath)
 
-		signingKeyFile := path.Join(localCertDir.Get(), "ca-key.pem")
+		s.caBundlePath = defaultCACertPath
+	} else if features.PilotCertProvider.Get() == IstiodCAProvider {
+		log.Infof("Generating istiod-signed cert for %v", names)
+		certChain, keyPEM, err = s.CA.GenKeyCert(names, SelfSignedCACertTTL.Get())
+
+		signingKeyFile := path.Join(LocalCertDir.Get(), "ca-key.pem")
+		// check if signing key file exists the cert dir
 		if _, err := os.Stat(signingKeyFile); err != nil {
 			log.Infof("No plugged-in cert at %v; self-signed cert is used", signingKeyFile)
+
 			// When Citadel is configured to use self-signed certs, keep a local copy so other
 			// components can load it via file (e.g. webhook config controller).
 			if err := os.MkdirAll(dnsCertDir, 0700); err != nil {
@@ -140,7 +160,7 @@ func (s *Server) initDNSCerts(hostname string) error {
 			// We have direct access to the self-signed
 			internalSelfSignedRootPath := path.Join(dnsCertDir, "self-signed-root.pem")
 
-			rootCert := s.ca.GetCAKeyCertBundle().GetRootCertPem()
+			rootCert := s.CA.GetCAKeyCertBundle().GetRootCertPem()
 			if err = ioutil.WriteFile(internalSelfSignedRootPath, rootCert, 0600); err != nil {
 				return err
 			}
@@ -151,8 +171,8 @@ func (s *Server) initDNSCerts(hostname string) error {
 						select {
 						case <-stop:
 							return
-						case <-time.After(namespaceResyncPeriod):
-							newRootCert := s.ca.GetCAKeyCertBundle().GetRootCertPem()
+						case <-time.After(controller.NamespaceResyncPeriod):
+							newRootCert := s.CA.GetCAKeyCertBundle().GetRootCertPem()
 							if !bytes.Equal(rootCert, newRootCert) {
 								rootCert = newRootCert
 								if err = ioutil.WriteFile(internalSelfSignedRootPath, rootCert, 0600); err != nil {
@@ -169,11 +189,11 @@ func (s *Server) initDNSCerts(hostname string) error {
 			s.caBundlePath = internalSelfSignedRootPath
 		} else {
 			log.Infof("Use plugged-in cert at %v", signingKeyFile)
-			s.caBundlePath = path.Join(localCertDir.Get(), "root-cert.pem")
+			s.caBundlePath = path.Join(LocalCertDir.Get(), "root-cert.pem")
 		}
 
 	} else {
-		log.Infof("User specified certs: %v", features.PilotCertProvider.Get())
+		log.Infof("User specified cert provider: %v", features.PilotCertProvider.Get())
 		return nil
 	}
 	if err != nil {
@@ -193,6 +213,6 @@ func (s *Server) initDNSCerts(hostname string) error {
 	if err != nil {
 		return err
 	}
-	log.Infoa("Certificates created in ", dnsCertDir)
+	log.Infoa("DNS certificates created in ", dnsCertDir)
 	return nil
 }

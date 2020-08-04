@@ -1,4 +1,4 @@
-// Copyright 2020 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,11 +17,11 @@ package v1alpha3
 import "testing"
 
 func TestGetClusterNameFromURL(t *testing.T) {
-	cluster, err := thritRLSClusterNameFromAuthority("")
+	cluster, err := thriftRLSClusterNameFromAuthority("")
 	if err == nil || cluster != "" {
 		t.Fatalf("should error and return empty url (got %v)", cluster)
 	}
-	cluster, err = thritRLSClusterNameFromAuthority("host.com:80")
+	cluster, err = thriftRLSClusterNameFromAuthority("host.com:80")
 	if err != nil {
 		t.Fatal("host without port should not cause error")
 	}

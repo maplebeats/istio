@@ -1,4 +1,4 @@
-// Copyright 2017 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,9 +15,12 @@
 package mesh
 
 import (
+	"fmt"
 	"io/ioutil"
 	"net"
 	"time"
+
+	"github.com/gogo/protobuf/proto"
 
 	"istio.io/api/networking/v1alpha3"
 
@@ -36,61 +39,87 @@ import (
 
 // DefaultProxyConfig for individual proxies
 func DefaultProxyConfig() meshconfig.ProxyConfig {
+	// TODO: include revision based on REVISION env
+	// TODO: set default namespace based on POD_NAMESPACE env
 	return meshconfig.ProxyConfig{
-		ConfigPath:             constants.ConfigPathDir,
-		BinaryPath:             constants.BinaryPathFilename,
-		ServiceCluster:         constants.ServiceClusterName,
-		DrainDuration:          types.DurationProto(45 * time.Second),
-		ParentShutdownDuration: types.DurationProto(60 * time.Second),
-		DiscoveryAddress:       constants.DiscoveryPlainAddress,
-		ConnectTimeout:         types.DurationProto(10 * time.Second),
-		StatsdUdpAddress:       "",
-		EnvoyMetricsService:    &meshconfig.RemoteService{Address: ""},
-		EnvoyAccessLogService:  &meshconfig.RemoteService{Address: ""},
-		ProxyAdminPort:         15000,
-		ControlPlaneAuthPolicy: meshconfig.AuthenticationPolicy_NONE,
-		CustomConfigFile:       "",
-		Concurrency:            0,
-		StatNameLength:         189,
-		Tracing:                nil,
+		// missing: ConnectTimeout: 10 * time.Second,
+		ConfigPath:               constants.ConfigPathDir,
+		ServiceCluster:           constants.ServiceClusterName,
+		DrainDuration:            types.DurationProto(45 * time.Second),
+		ParentShutdownDuration:   types.DurationProto(60 * time.Second),
+		TerminationDrainDuration: types.DurationProto(5 * time.Second),
+		ProxyAdminPort:           15000,
+		Concurrency:              &types.Int32Value{Value: 2},
+		ControlPlaneAuthPolicy:   meshconfig.AuthenticationPolicy_MUTUAL_TLS,
+		DiscoveryAddress:         "istiod.istio-system.svc:15012",
+		Tracing: &meshconfig.Tracing{
+			Tracer: &meshconfig.Tracing_Zipkin_{
+				Zipkin: &meshconfig.Tracing_Zipkin{
+					Address: "zipkin.istio-system:9411",
+				},
+			},
+		},
+
+		// Code defaults
+		BinaryPath:            constants.BinaryPathFilename,
+		StatsdUdpAddress:      "",
+		EnvoyMetricsService:   &meshconfig.RemoteService{Address: ""},
+		EnvoyAccessLogService: &meshconfig.RemoteService{Address: ""},
+		CustomConfigFile:      "",
+		StatNameLength:        189,
+		StatusPort:            15020,
 	}
 }
 
-// DefaultMeshConfig configuration
+// DefaultMeshConfig returns the default mesh config.
+// This is merged with values from the mesh config map.
 func DefaultMeshConfig() meshconfig.MeshConfig {
 	proxyConfig := DefaultProxyConfig()
+
+	// Defaults matching the standard install
+	// order matches the generated mesh config.
 	return meshconfig.MeshConfig{
-		IngressClass:                      "istio",
-		ReportBatchMaxTime:                types.DurationProto(1 * time.Second),
-		ReportBatchMaxEntries:             100,
-		MixerCheckServer:                  "",
-		MixerReportServer:                 "",
-		DisablePolicyChecks:               true,
-		PolicyCheckFailOpen:               false,
-		SidecarToTelemetrySessionAffinity: false,
-		RootNamespace:                     constants.IstioSystemNamespace,
-		ProxyListenPort:                   15001,
-		ConnectTimeout:                    types.DurationProto(10 * time.Second),
-		IngressService:                    "istio-ingressgateway",
-		EnableTracing:                     true,
-		AccessLogFile:                     "/dev/stdout",
-		AccessLogEncoding:                 meshconfig.MeshConfig_TEXT,
-		DefaultConfig:                     &proxyConfig,
-		SdsUdsPath:                        "",
-		EnableSdsTokenMount:               false,
-		TrustDomain:                       "cluster.local",
-		TrustDomainAliases:                []string{},
-		Certificates:                      []*meshconfig.Certificate{},
-		DefaultServiceExportTo:            []string{"*"},
-		DefaultVirtualServiceExportTo:     []string{"*"},
-		DefaultDestinationRuleExportTo:    []string{"*"},
-		OutboundTrafficPolicy:             &meshconfig.MeshConfig_OutboundTrafficPolicy{Mode: meshconfig.MeshConfig_OutboundTrafficPolicy_ALLOW_ANY},
-		DnsRefreshRate:                    types.DurationProto(5 * time.Second), // 5 seconds is the default refresh rate used in Envoy
-		ProtocolDetectionTimeout:          types.DurationProto(100 * time.Millisecond),
-		EnableAutoMtls:                    &types.BoolValue{Value: false},
-		ThriftConfig:                      &meshconfig.MeshConfig_ThriftConfig{},
-		LocalityLbSetting:                 &v1alpha3.LocalityLoadBalancerSetting{},
+		EnableTracing:               true,
+		AccessLogFile:               "",
+		AccessLogEncoding:           meshconfig.MeshConfig_TEXT,
+		AccessLogFormat:             "",
+		EnableEnvoyAccessLogService: false,
+		ReportBatchMaxEntries:       100,
+		ReportBatchMaxTime:          types.DurationProto(1 * time.Second),
+		ProtocolDetectionTimeout:    types.DurationProto(5 * time.Second),
+		IngressService:              "istio-ingressgateway",
+		IngressControllerMode:       meshconfig.MeshConfig_STRICT,
+		IngressClass:                "istio",
+		TrustDomain:                 "cluster.local",
+		TrustDomainAliases:          []string{},
+		EnableAutoMtls:              &types.BoolValue{Value: true},
+		OutboundTrafficPolicy:       &meshconfig.MeshConfig_OutboundTrafficPolicy{Mode: meshconfig.MeshConfig_OutboundTrafficPolicy_ALLOW_ANY},
+		LocalityLbSetting: &v1alpha3.LocalityLoadBalancerSetting{
+			Enabled: &types.BoolValue{Value: true},
+		},
+		Certificates:  []*meshconfig.Certificate{},
+		DefaultConfig: &proxyConfig,
+
+		RootNamespace:                  constants.IstioSystemNamespace,
+		ProxyListenPort:                15001,
+		ConnectTimeout:                 types.DurationProto(10 * time.Second),
+		DefaultServiceExportTo:         []string{"*"},
+		DefaultVirtualServiceExportTo:  []string{"*"},
+		DefaultDestinationRuleExportTo: []string{"*"},
+		DnsRefreshRate:                 types.DurationProto(5 * time.Second), // 5 seconds is the default refresh rate used in Envoy
+		ThriftConfig:                   &meshconfig.MeshConfig_ThriftConfig{},
+		ServiceSettings:                make([]*meshconfig.MeshConfig_ServiceSettings, 0),
 	}
+}
+
+// ApplyProxyConfig applies the give proxy config yaml to a mesh config object. The passed in mesh config
+// will not be modified.
+func ApplyProxyConfig(yaml string, meshConfig meshconfig.MeshConfig) (*meshconfig.MeshConfig, error) {
+	mc := proto.Clone(&meshConfig).(*meshconfig.MeshConfig)
+	if err := gogoprotomarshal.ApplyYAML(yaml, mc.DefaultConfig); err != nil {
+		return nil, fmt.Errorf("could not parse proxy config: %v", err)
+	}
+	return mc, nil
 }
 
 // ApplyMeshConfig returns a new MeshConfig decoded from the
@@ -146,10 +175,9 @@ func ParseMeshNetworks(yaml string) (*meshconfig.MeshNetworks, error) {
 		return nil, multierror.Prefix(err, "failed to convert to proto.")
 	}
 
-	// TODO validate the loaded MeshNetworks
-	// if err := ValidateMeshNetworks(&out); err != nil {
-	// 	return nil, err
-	// }
+	if err := validation.ValidateMeshNetworks(&out); err != nil {
+		return nil, err
+	}
 	return &out, nil
 }
 
@@ -180,13 +208,13 @@ func ResolveHostsInNetworksConfig(config *meshconfig.MeshNetworks) {
 	}
 	for _, n := range config.Networks {
 		for _, gw := range n.Gateways {
-			gwIP := net.ParseIP(gw.GetAddress())
-			if gwIP == nil {
-				addrs, err := net.LookupHost(gw.GetAddress())
+			gwAddr := gw.GetAddress()
+			gwIP := net.ParseIP(gwAddr)
+			if gwIP == nil && len(gwAddr) != 0 {
+				addrs, err := net.LookupHost(gwAddr)
 				if err != nil {
 					log.Warnf("error resolving host %#v: %v", gw.GetAddress(), err)
-				}
-				if err == nil && len(addrs) > 0 {
+				} else {
 					gw.Gw = &meshconfig.Network_IstioNetworkGateway_Address{
 						Address: addrs[0],
 					}

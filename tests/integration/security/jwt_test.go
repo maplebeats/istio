@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,8 +24,6 @@ import (
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/framework/components/echo"
 	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
-	"istio.io/istio/pkg/test/framework/components/environment"
-	"istio.io/istio/pkg/test/framework/components/ingress"
 	"istio.io/istio/pkg/test/framework/components/namespace"
 	"istio.io/istio/pkg/test/util/file"
 	"istio.io/istio/pkg/test/util/retry"
@@ -40,301 +38,11 @@ const (
 	authHeaderKey = "Authorization"
 )
 
-func TestAuthnJwt(t *testing.T) {
-	testIssuer1Token := jwt.TokenIssuer1
-	testIssuer2Token := jwt.TokenIssuer2
-
-	framework.NewTest(t).
-		RequiresEnvironment(environment.Kube).
-		Run(func(ctx framework.TestContext) {
-			ns := namespace.NewOrFail(t, ctx, namespace.Config{
-				Prefix: "authn-jwt",
-				Inject: true,
-			})
-
-			// Apply the policy.
-			namespaceTmpl := map[string]string{
-				"Namespace": ns.Name(),
-			}
-			jwtPolicies := tmpl.EvaluateAllOrFail(t, namespaceTmpl,
-				file.AsStringOrFail(t, "testdata/jwt/simple-jwt-policy.yaml.tmpl"),
-				file.AsStringOrFail(t, "testdata/jwt/jwt-with-paths.yaml.tmpl"),
-				file.AsStringOrFail(t, "testdata/jwt/two-issuers.yaml.tmpl"))
-			g.ApplyConfigOrFail(t, ns, jwtPolicies...)
-			defer g.DeleteConfigOrFail(t, ns, jwtPolicies...)
-
-			var a, b, c, d, e echo.Instance
-			echoboot.NewBuilderOrFail(ctx, ctx).
-				With(&a, util.EchoConfig("a", ns, false, nil, g, p)).
-				With(&b, util.EchoConfig("b", ns, false, nil, g, p)).
-				With(&c, util.EchoConfig("c", ns, false, nil, g, p)).
-				With(&d, util.EchoConfig("d", ns, false, nil, g, p)).
-				With(&e, util.EchoConfig("e", ns, false, nil, g, p)).
-				BuildOrFail(t)
-
-			testCases := []authn.TestCase{
-				{
-					Name: "jwt-simple-valid-token",
-					Request: connection.Checker{
-						From: a,
-						Options: echo.CallOptions{
-							Target:   b,
-							PortName: "http",
-							Scheme:   scheme.HTTP,
-							Headers: map[string][]string{
-								authHeaderKey: {"Bearer " + testIssuer1Token},
-							},
-						},
-					},
-					ExpectResponseCode: response.StatusCodeOK,
-				},
-				{
-					Name: "jwt-simple-expired-token",
-					Request: connection.Checker{
-						From: a,
-						Options: echo.CallOptions{
-							Target:   b,
-							PortName: "http",
-							Scheme:   scheme.HTTP,
-							Headers: map[string][]string{
-								authHeaderKey: {"Bearer " + jwt.TokenExpired},
-							},
-						},
-					},
-					ExpectResponseCode: response.StatusUnauthorized,
-				},
-				{
-					Name: "jwt-simple-no-token",
-					Request: connection.Checker{
-						From: a,
-						Options: echo.CallOptions{
-							Target:   b,
-							PortName: "http",
-							Scheme:   scheme.HTTP,
-						},
-					},
-					ExpectResponseCode: response.StatusUnauthorized,
-				},
-				{
-					Name: "jwt-excluded-paths-no-token[/health_check]",
-					Request: connection.Checker{
-						From: a,
-						Options: echo.CallOptions{
-							Target:   c,
-							Path:     "/health_check",
-							PortName: "http",
-							Scheme:   scheme.HTTP,
-						},
-					},
-					ExpectResponseCode: response.StatusCodeOK,
-				},
-				{
-					Name: "jwt-excluded-paths-no-token[/guest-us]",
-					Request: connection.Checker{
-						From: a,
-						Options: echo.CallOptions{
-							Target:   c,
-							Path:     "/guest-us",
-							PortName: "http",
-							Scheme:   scheme.HTTP,
-						},
-					},
-					ExpectResponseCode: response.StatusCodeOK,
-				},
-				{
-					Name: "jwt-excluded-paths-no-token[/index.html]",
-					Request: connection.Checker{
-						From: a,
-						Options: echo.CallOptions{
-							Target:   c,
-							Path:     "/index.html",
-							PortName: "http",
-							Scheme:   scheme.HTTP,
-						},
-					},
-					ExpectResponseCode: response.StatusUnauthorized,
-				},
-				{
-					Name: "jwt-excluded-paths-valid-token",
-					Request: connection.Checker{
-						From: a,
-						Options: echo.CallOptions{
-							Target:   c,
-							Path:     "/index.html",
-							PortName: "http",
-							Scheme:   scheme.HTTP,
-							Headers: map[string][]string{
-								authHeaderKey: {"Bearer " + testIssuer1Token},
-							},
-						},
-					},
-					ExpectResponseCode: response.StatusCodeOK,
-				},
-				{
-					Name: "jwt-included-paths-no-token[/index.html]",
-					Request: connection.Checker{
-						From: a,
-						Options: echo.CallOptions{
-							Target:   d,
-							Path:     "/index.html",
-							PortName: "http",
-							Scheme:   scheme.HTTP,
-						},
-					},
-					ExpectResponseCode: response.StatusCodeOK,
-				},
-				{
-					Name: "jwt-included-paths-no-token[/something-confidential]",
-					Request: connection.Checker{
-						From: a,
-						Options: echo.CallOptions{
-							Target:   d,
-							Path:     "/something-confidential",
-							PortName: "http",
-							Scheme:   scheme.HTTP,
-						},
-					},
-					ExpectResponseCode: response.StatusUnauthorized,
-				},
-				{
-					Name: "jwt-included-paths-valid-token",
-					Request: connection.Checker{
-						From: a,
-						Options: echo.CallOptions{
-							Target:   d,
-							Path:     "/something-confidential",
-							PortName: "http",
-							Scheme:   scheme.HTTP,
-							Headers: map[string][]string{
-								authHeaderKey: {"Bearer " + testIssuer1Token},
-							},
-						},
-					},
-					ExpectResponseCode: response.StatusCodeOK,
-				},
-				{
-					Name: "jwt-two-issuers-no-token",
-					Request: connection.Checker{
-						From: a,
-						Options: echo.CallOptions{
-							Target:   e,
-							PortName: "http",
-							Scheme:   scheme.HTTP,
-						},
-					},
-					ExpectResponseCode: response.StatusUnauthorized,
-				},
-				{
-					Name: "jwt-two-issuers-token2",
-					Request: connection.Checker{
-						From: a,
-						Options: echo.CallOptions{
-							Target:   e,
-							PortName: "http",
-							Scheme:   scheme.HTTP,
-							Headers: map[string][]string{
-								authHeaderKey: {"Bearer " + testIssuer2Token},
-							},
-						},
-					},
-					ExpectResponseCode: response.StatusCodeOK,
-				},
-				{
-					Name: "jwt-two-issuers-token1",
-					Request: connection.Checker{
-						From: a,
-						Options: echo.CallOptions{
-							Target:   e,
-							PortName: "http",
-							Scheme:   scheme.HTTP,
-							Headers: map[string][]string{
-								authHeaderKey: {"Bearer " + testIssuer1Token},
-							},
-						},
-					},
-					ExpectResponseCode: response.StatusUnauthorized,
-				},
-				{
-					Name: "jwt-two-issuers-invalid-token",
-					Request: connection.Checker{
-						From: a,
-						Options: echo.CallOptions{
-							Target:   e,
-							PortName: "http",
-							Path:     "/testing-istio-jwt",
-							Scheme:   scheme.HTTP,
-							Headers: map[string][]string{
-								authHeaderKey: {"Bearer " + jwt.TokenInvalid},
-							},
-						},
-					},
-					ExpectResponseCode: response.StatusUnauthorized,
-				},
-				{
-					Name: "jwt-two-issuers-token1[/testing-istio-jwt]",
-					Request: connection.Checker{
-						From: a,
-						Options: echo.CallOptions{
-							Target:   e,
-							PortName: "http",
-							Scheme:   scheme.HTTP,
-							Path:     "/testing-istio-jwt",
-							Headers: map[string][]string{
-								authHeaderKey: {"Bearer " + testIssuer1Token},
-							},
-						},
-					},
-					ExpectResponseCode: response.StatusCodeOK,
-				},
-				{
-					Name: "jwt-two-issuers-token2[/testing-istio-jwt]",
-					Request: connection.Checker{
-						From: a,
-						Options: echo.CallOptions{
-							Target:   e,
-							PortName: "http",
-							Scheme:   scheme.HTTP,
-							Path:     "/testing-istio-jwt",
-							Headers: map[string][]string{
-								authHeaderKey: {"Bearer " + testIssuer2Token},
-							},
-						},
-					},
-					ExpectResponseCode: response.StatusUnauthorized,
-				},
-				{
-					Name: "jwt-wrong-issuers",
-					Request: connection.Checker{
-						From: a,
-						Options: echo.CallOptions{
-							Target:   e,
-							Path:     "/wrong_issuer",
-							PortName: "http",
-							Scheme:   scheme.HTTP,
-							Headers: map[string][]string{
-								authHeaderKey: {"Bearer " + testIssuer1Token},
-							},
-						},
-					},
-					ExpectResponseCode: response.StatusUnauthorized,
-				},
-			}
-
-			for _, c := range testCases {
-				t.Run(c.Name, func(t *testing.T) {
-					retry.UntilSuccessOrFail(t, c.CheckAuthn,
-						retry.Delay(250*time.Millisecond), retry.Timeout(30*time.Second))
-				})
-			}
-		})
-}
-
 // TestRequestAuthentication tests beta authn policy for jwt.
 func TestRequestAuthentication(t *testing.T) {
 	payload1 := strings.Split(jwt.TokenIssuer1, ".")[1]
 	payload2 := strings.Split(jwt.TokenIssuer2, ".")[1]
 	framework.NewTest(t).
-		RequiresEnvironment(environment.Kube).
 		Run(func(ctx framework.TestContext) {
 			ns := namespace.NewOrFail(t, ctx, namespace.Config{
 				Prefix: "req-authn",
@@ -351,16 +59,16 @@ func TestRequestAuthentication(t *testing.T) {
 				file.AsStringOrFail(t, "testdata/requestauthn/c-authn.yaml.tmpl"),
 				file.AsStringOrFail(t, "testdata/requestauthn/e-authn.yaml.tmpl"),
 			)
-			g.ApplyConfigOrFail(t, ns, jwtPolicies...)
-			defer g.DeleteConfigOrFail(t, ns, jwtPolicies...)
+			ctx.Config().ApplyYAMLOrFail(t, ns.Name(), jwtPolicies...)
+			defer ctx.Config().DeleteYAMLOrFail(t, ns.Name(), jwtPolicies...)
 
 			var a, b, c, d, e echo.Instance
-			echoboot.NewBuilderOrFail(ctx, ctx).
-				With(&a, util.EchoConfig("a", ns, false, nil, g, p)).
-				With(&b, util.EchoConfig("b", ns, false, nil, g, p)).
-				With(&c, util.EchoConfig("c", ns, false, nil, g, p)).
-				With(&d, util.EchoConfig("d", ns, false, nil, g, p)).
-				With(&e, util.EchoConfig("e", ns, false, nil, g, p)).
+			echoboot.NewBuilder(ctx).
+				With(&a, util.EchoConfig("a", ns, false, nil)).
+				With(&b, util.EchoConfig("b", ns, false, nil)).
+				With(&c, util.EchoConfig("c", ns, false, nil)).
+				With(&d, util.EchoConfig("d", ns, false, nil)).
+				With(&e, util.EchoConfig("e", ns, false, nil)).
 				BuildOrFail(t)
 
 			testCases := []authn.TestCase{
@@ -565,15 +273,8 @@ func TestRequestAuthentication(t *testing.T) {
 // The policy is also set at global namespace, with authorization on ingressgateway.
 func TestIngressRequestAuthentication(t *testing.T) {
 	framework.NewTest(t).
-		RequiresEnvironment(environment.Kube).
 		Run(func(ctx framework.TestContext) {
-			var ingr ingress.Instance
-			var err error
-			if ingr, err = ingress.New(ctx, ingress.Config{
-				Istio: ist,
-			}); err != nil {
-				t.Fatal(err)
-			}
+			ingr := ist.IngressFor(ctx.Clusters().Default())
 
 			ns := namespace.NewOrFail(t, ctx, namespace.Config{
 				Prefix: "req-authn-ingress",
@@ -588,20 +289,20 @@ func TestIngressRequestAuthentication(t *testing.T) {
 
 			applyPolicy := func(filename string, ns namespace.Instance) []string {
 				policy := tmpl.EvaluateAllOrFail(t, namespaceTmpl, file.AsStringOrFail(t, filename))
-				g.ApplyConfigOrFail(t, ns, policy...)
+				ctx.Config().ApplyYAMLOrFail(t, ns.Name(), policy...)
 				return policy
 			}
 
 			securityPolicies := applyPolicy("testdata/requestauthn/global-jwt.yaml.tmpl", rootNS{})
 			ingressCfgs := applyPolicy("testdata/requestauthn/ingress.yaml.tmpl", ns)
 
-			defer g.DeleteConfigOrFail(t, rootNS{}, securityPolicies...)
-			defer g.DeleteConfigOrFail(t, ns, ingressCfgs...)
+			defer ctx.Config().DeleteYAMLOrFail(t, rootNS{}.Name(), securityPolicies...)
+			defer ctx.Config().DeleteYAMLOrFail(t, ns.Name(), ingressCfgs...)
 
 			var a, b echo.Instance
-			echoboot.NewBuilderOrFail(ctx, ctx).
-				With(&a, util.EchoConfig("a", ns, false, nil, g, p)).
-				With(&b, util.EchoConfig("b", ns, false, nil, g, p)).
+			echoboot.NewBuilder(ctx).
+				With(&a, util.EchoConfig("a", ns, false, nil)).
+				With(&b, util.EchoConfig("b", ns, false, nil)).
 				BuildOrFail(t)
 
 			// These test cases verify in-mesh traffic doesn't need tokens.

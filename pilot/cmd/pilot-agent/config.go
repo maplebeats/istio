@@ -1,4 +1,4 @@
-// Copyright 2020 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,24 +15,39 @@
 package main
 
 import (
+	"fmt"
 	"io/ioutil"
+	"os"
+	"strconv"
 	"strings"
 
 	"github.com/gogo/protobuf/types"
 
 	"istio.io/api/annotation"
 	meshconfig "istio.io/api/mesh/v1alpha1"
-	"istio.io/istio/pilot/pkg/proxy"
-	"istio.io/istio/pilot/pkg/serviceregistry"
+	"istio.io/pkg/log"
+
+	"istio.io/istio/pilot/pkg/util/network"
 	"istio.io/istio/pkg/bootstrap"
 	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/config/mesh"
 	"istio.io/istio/pkg/config/validation"
-	"istio.io/pkg/log"
 )
 
 func constructProxyConfig() (meshconfig.ProxyConfig, error) {
-	meshConfig, err := getMeshConfig()
+	annotations, err := readPodAnnotations()
+	if err != nil {
+		log.Warnf("failed to read pod annotations: %v", err)
+	}
+	var fileMeshContents string
+	if fileExists(meshConfigFile) {
+		contents, err := ioutil.ReadFile(meshConfigFile)
+		if err != nil {
+			return meshconfig.ProxyConfig{}, fmt.Errorf("failed to read mesh config file %v: %v", meshConfigFile, err)
+		}
+		fileMeshContents = string(contents)
+	}
+	meshConfig, err := getMeshConfig(fileMeshContents, annotations[annotation.ProxyConfig.Name])
 	if err != nil {
 		return meshconfig.ProxyConfig{}, err
 	}
@@ -41,103 +56,70 @@ func constructProxyConfig() (meshconfig.ProxyConfig, error) {
 		proxyConfig = *meshConfig.DefaultConfig
 	}
 
-	// TODO(https://github.com/istio/istio/issues/21222) remove all of these flag overrides
-	proxyConfig.CustomConfigFile = customConfigFile
-	proxyConfig.ProxyBootstrapTemplatePath = templateFile
-	proxyConfig.ConfigPath = configPath
-	proxyConfig.BinaryPath = binaryPath
+	proxyConfig.Concurrency = &types.Int32Value{Value: int32(concurrency)}
 	proxyConfig.ServiceCluster = serviceCluster
-	proxyConfig.DrainDuration = types.DurationProto(drainDuration)
-	proxyConfig.ParentShutdownDuration = types.DurationProto(parentShutdownDuration)
-	if discoveryAddress != "" {
-		proxyConfig.DiscoveryAddress = discoveryAddress
-	}
-	proxyConfig.ConnectTimeout = types.DurationProto(connectTimeout)
-	proxyConfig.StatsdUdpAddress = statsdUDPAddress
-
-	if envoyMetricsService != "" {
-		if ms := fromJSON(envoyMetricsService); ms != nil {
-			proxyConfig.EnvoyMetricsService = ms
-			appendTLSCerts(ms)
-		}
-	}
-	if envoyAccessLogService != "" {
-		if rs := fromJSON(envoyAccessLogService); rs != nil {
-			proxyConfig.EnvoyAccessLogService = rs
-			appendTLSCerts(rs)
-		}
-	}
-	proxyConfig.ProxyAdminPort = int32(proxyAdminPort)
-	proxyConfig.Concurrency = int32(concurrency)
-
 	// resolve statsd address
 	if proxyConfig.StatsdUdpAddress != "" {
-		addr, err := proxy.ResolveAddr(proxyConfig.StatsdUdpAddress)
+		addr, err := network.ResolveAddr(proxyConfig.StatsdUdpAddress)
 		if err != nil {
-			// If istio-mixer.istio-system can't be resolved, skip generating the statsd config.
-			// (instead of crashing). Mixer is optional.
 			log.Warnf("resolve StatsdUdpAddress failed: %v", err)
 			proxyConfig.StatsdUdpAddress = ""
 		} else {
 			proxyConfig.StatsdUdpAddress = addr
 		}
 	}
-
-	// set tracing config
-	if lightstepAddress != "" {
-		proxyConfig.Tracing = &meshconfig.Tracing{
-			Tracer: &meshconfig.Tracing_Lightstep_{
-				Lightstep: &meshconfig.Tracing_Lightstep{
-					Address:     lightstepAddress,
-					AccessToken: lightstepAccessToken,
-					Secure:      lightstepSecure,
-					CacertPath:  lightstepCacertPath,
-				},
-			},
-		}
-	} else if zipkinAddress != "" {
-		proxyConfig.Tracing = &meshconfig.Tracing{
-			Tracer: &meshconfig.Tracing_Zipkin_{
-				Zipkin: &meshconfig.Tracing_Zipkin{
-					Address: zipkinAddress,
-				},
-			},
-		}
-	} else if datadogAgentAddress != "" {
-		proxyConfig.Tracing = &meshconfig.Tracing{
-			Tracer: &meshconfig.Tracing_Datadog_{
-				Datadog: &meshconfig.Tracing_Datadog{
-					Address: datadogAgentAddress,
-				},
-			},
-		}
-	} else if stackdriverTracingEnabled.Get() {
-		proxyConfig.Tracing = &meshconfig.Tracing{
-			Tracer: &meshconfig.Tracing_Stackdriver_{
-				Stackdriver: &meshconfig.Tracing_Stackdriver{
-					Debug: stackdriverTracingDebug.Get(),
-					MaxNumberOfAnnotations: &types.Int64Value{
-						Value: int64(stackdriverTracingMaxNumberOfAnnotations.Get()),
-					},
-					MaxNumberOfAttributes: &types.Int64Value{
-						Value: int64(stackdriverTracingMaxNumberOfAttributes.Get()),
-					},
-					MaxNumberOfMessageEvents: &types.Int64Value{
-						Value: int64(stackdriverTracingMaxNumberOfMessageEvents.Get()),
-					},
-				},
-			},
-		}
-	}
-
 	if err := validation.ValidateProxyConfig(&proxyConfig); err != nil {
 		return meshconfig.ProxyConfig{}, err
 	}
-	annotations, err := readPodAnnotations()
-	if err != nil {
-		log.Warnf("failed to read pod annotations: %v", err)
-	}
 	return applyAnnotations(proxyConfig, annotations), nil
+}
+
+// getMeshConfig gets the mesh config to use for proxy configuration
+// 1. First we take the default config
+// 2. Then we apply any settings from file (this comes from gateway mounting configmap)
+// 3. Then we apply settings from environment variable (this comes from sidecar injection sticking meshconfig here)
+// 4. Then we apply overrides from annotation (this comes from annotation on gateway, passed through downward API)
+//
+// Merging is done by replacement. Any fields present in the overlay will replace those existing fields, while
+// untouched fields will remain untouched. This means lists will be replaced, not appended to, for example.
+func getMeshConfig(fileOverride, annotationOverride string) (meshconfig.MeshConfig, error) {
+	mc := mesh.DefaultMeshConfig()
+
+	if fileOverride != "" {
+		log.Infof("Apply mesh config from file %v", fileOverride)
+		fileMesh, err := mesh.ApplyMeshConfig(fileOverride, mc)
+		if err != nil || fileMesh == nil {
+			return meshconfig.MeshConfig{}, fmt.Errorf("failed to unmarshal mesh config from file [%v]: %v", fileOverride, err)
+		}
+		mc = *fileMesh
+	}
+
+	if proxyConfigEnv != "" {
+		log.Infof("Apply proxy config from env %v", proxyConfigEnv)
+		envMesh, err := mesh.ApplyProxyConfig(proxyConfigEnv, mc)
+		if err != nil || envMesh == nil {
+			return meshconfig.MeshConfig{}, fmt.Errorf("failed to unmarshal mesh config from environment [%v]: %v", proxyConfigEnv, err)
+		}
+		mc = *envMesh
+	}
+
+	if annotationOverride != "" {
+		log.Infof("Apply proxy config from annotation %v", annotationOverride)
+		annotationMesh, err := mesh.ApplyProxyConfig(annotationOverride, mc)
+		if err != nil || annotationMesh == nil {
+			return meshconfig.MeshConfig{}, fmt.Errorf("failed to unmarshal mesh config from annotation [%v]: %v", annotationOverride, err)
+		}
+		mc = *annotationMesh
+	}
+
+	return mc, nil
+}
+
+func fileExists(path string) bool {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return false
+	}
+	return true
 }
 
 func readPodAnnotations() (map[string]string, error) {
@@ -153,31 +135,21 @@ func applyAnnotations(config meshconfig.ProxyConfig, annos map[string]string) me
 	if v, f := annos[annotation.SidecarDiscoveryAddress.Name]; f {
 		config.DiscoveryAddress = v
 	}
+	if v, f := annos[annotation.SidecarStatusPort.Name]; f {
+		p, err := strconv.Atoi(v)
+		if err != nil {
+			log.Errorf("Invalid annotation %v=%v: %v", annotation.SidecarStatusPort, p, err)
+		}
+		config.StatusPort = int32(p)
+	}
 	return config
 }
 
-func getControlPlaneNamespace(podNamespace string, discoveryAddress string) string {
-	ns := ""
-	if registryID == serviceregistry.Kubernetes {
-		partDiscoveryAddress := strings.Split(discoveryAddress, ":")
-		discoveryHostname := partDiscoveryAddress[0]
-		parts := strings.Split(discoveryHostname, ".")
-		if len(parts) == 1 {
-			// namespace of pilot is not part of discovery address use
-			// pod namespace e.g. istio-pilot:15005
-			ns = podNamespace
-		} else if len(parts) == 2 {
-			// namespace is found in the discovery address
-			// e.g. istio-pilot.istio-system:15005
-			ns = parts[1]
-		} else {
-			// discovery address is a remote address. For remote clusters
-			// only support the default config, or env variable
-			ns = istioNamespaceVar.Get()
-			if ns == "" {
-				ns = constants.IstioSystemNamespace
-			}
-		}
+func getPilotSan(discoveryAddress string) string {
+	discHost := strings.Split(discoveryAddress, ":")[0]
+	// For local debugging - the discoveryAddress is set to localhost, but the cert issued for normal SA.
+	if discHost == "localhost" {
+		discHost = "istiod.istio-system.svc"
 	}
-	return ns
+	return discHost
 }

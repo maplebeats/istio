@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,8 +15,6 @@
 package authz
 
 import (
-	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -24,23 +22,19 @@ import (
 
 	"istio.io/istio/pilot/pkg/networking/util"
 
-	v2 "github.com/envoyproxy/go-control-plane/envoy/api/v2"
-	auth "github.com/envoyproxy/go-control-plane/envoy/api/v2/auth"
-	listener "github.com/envoyproxy/go-control-plane/envoy/api/v2/listener"
-	envoy_jwt "github.com/envoyproxy/go-control-plane/envoy/config/filter/http/jwt_authn/v2alpha"
-	rbac_http_filter "github.com/envoyproxy/go-control-plane/envoy/config/filter/http/rbac/v2"
-	hcm_filter "github.com/envoyproxy/go-control-plane/envoy/config/filter/network/http_connection_manager/v2"
-	rbac_tcp_filter "github.com/envoyproxy/go-control-plane/envoy/config/filter/network/rbac/v2"
-	"github.com/envoyproxy/go-control-plane/pkg/conversion"
-	gogojsonpb "github.com/gogo/protobuf/jsonpb"
-	"github.com/golang/protobuf/jsonpb"
+	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	envoy_jwt "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/jwt_authn/v3"
+	rbac_http_filter "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/rbac/v3"
+	hcm_filter "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	rbac_tcp_filter "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/rbac/v3"
+	tls "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/ptypes"
-	structpb "github.com/golang/protobuf/ptypes/struct"
 
-	authn_filter "istio.io/istio/security/proto/envoy/config/filter/http/authn/v2alpha1"
-	jwt_filter "istio.io/istio/security/proto/envoy/config/filter/http/jwt_auth/v2alpha1"
 	"istio.io/pkg/log"
+
+	authn_filter "istio.io/istio/pkg/envoy/config/filter/http/authn/v2alpha1"
 )
 
 type filterChainMatch struct {
@@ -50,11 +44,10 @@ type filterChainMatch struct {
 
 type filterChain struct {
 	match      *filterChainMatch
-	tlsContext *auth.DownstreamTlsContext
+	tlsContext *tls.DownstreamTlsContext
 
 	authN    *authn_filter.FilterConfig
 	envoyJWT *envoy_jwt.JwtAuthentication
-	istioJWT *jwt_filter.JwtAuthentication
 	rbacHTTP *rbac_http_filter.RBAC
 	rbacTCP  *rbac_tcp_filter.RBAC
 
@@ -70,10 +63,6 @@ type ParsedListener struct {
 
 func getFilterConfig(filter *listener.Filter, out proto.Message) error {
 	switch c := filter.ConfigType.(type) {
-	case *listener.Filter_Config:
-		if err := conversion.StructToMessage(c.Config, out); err != nil {
-			return err
-		}
 	case *listener.Filter_TypedConfig:
 		if err := ptypes.UnmarshalAny(c.TypedConfig, out); err != nil {
 			return err
@@ -93,10 +82,6 @@ func getHTTPConnectionManager(filter *listener.Filter) *hcm_filter.HttpConnectio
 
 func getHTTPFilterConfig(filter *hcm_filter.HttpFilter, out proto.Message) error {
 	switch c := filter.ConfigType.(type) {
-	case *hcm_filter.HttpFilter_Config:
-		if err := conversion.StructToMessage(c.Config, out); err != nil {
-			return err
-		}
 	case *hcm_filter.HttpFilter_TypedConfig:
 		if err := ptypes.UnmarshalAny(c.TypedConfig, out); err != nil {
 			return err
@@ -105,21 +90,8 @@ func getHTTPFilterConfig(filter *hcm_filter.HttpFilter, out proto.Message) error
 	return nil
 }
 
-func StructToGoGoMessage(pbst *structpb.Struct, out proto.Message) error {
-	if pbst == nil {
-		return errors.New("nil struct")
-	}
-
-	buf := &bytes.Buffer{}
-	if err := (&jsonpb.Marshaler{OrigName: true}).Marshal(buf, pbst); err != nil {
-		return err
-	}
-
-	return gogojsonpb.Unmarshal(buf, out)
-}
-
 // ParseListener parses the envoy listener config by extracting the auth related config.
-func ParseListener(listener *v2.Listener) *ParsedListener {
+func ParseListener(listener *listener.Listener) *ParsedListener {
 	parsedListener := &ParsedListener{
 		name: listener.Name,
 		ip:   listener.Address.GetSocketAddress().Address,
@@ -127,18 +99,16 @@ func ParseListener(listener *v2.Listener) *ParsedListener {
 	}
 
 	for _, fc := range listener.FilterChains {
-		tlsContext := &auth.DownstreamTlsContext{}
+		tlsContext := &tls.DownstreamTlsContext{}
 		if fc.TransportSocket != nil && fc.TransportSocket.Name == util.EnvoyTLSSocketName {
 			if err := ptypes.UnmarshalAny(fc.TransportSocket.GetTypedConfig(), tlsContext); err != nil {
-				continue
+				log.Warnf("failed to unmarshal tls settings: %v", err)
 			}
-		} else {
-			tlsContext = fc.TlsContext
 		}
 		parsedFC := &filterChain{tlsContext: tlsContext}
 		for _, filter := range fc.Filters {
 			switch filter.Name {
-			case "envoy.http_connection_manager":
+			case wellknown.HTTPConnectionManager:
 				if cm := getHTTPConnectionManager(filter); cm != nil {
 					for _, httpFilter := range cm.GetHttpFilters() {
 						switch httpFilter.GetName() {
@@ -156,14 +126,7 @@ func ParseListener(listener *v2.Listener) *ParsedListener {
 							} else {
 								parsedFC.envoyJWT = jwt
 							}
-						case "jwt-auth":
-							jwt := &jwt_filter.JwtAuthentication{}
-							if err := getHTTPFilterConfig(httpFilter, jwt); err != nil {
-								log.Errorf("found JWT filter but failed to parse: %s", err)
-							} else {
-								parsedFC.istioJWT = jwt
-							}
-						case "envoy.filters.http.rbac":
+						case wellknown.HTTPRoleBasedAccessControl:
 							rbacHTTP := &rbac_http_filter.RBAC{}
 							if err := getHTTPFilterConfig(httpFilter, rbacHTTP); err != nil {
 								log.Errorf("found RBAC HTTP filter but failed to parse: %s", err)
@@ -179,7 +142,7 @@ func ParseListener(listener *v2.Listener) *ParsedListener {
 						parsedFC.routeHTTP = r.Rds.RouteConfigName
 					}
 				}
-			case "envoy.filters.network.rbac":
+			case wellknown.RoleBasedAccessControl:
 				rbacTCP := &rbac_tcp_filter.RBAC{}
 				if err := getFilterConfig(filter, rbacTCP); err != nil {
 					log.Errorf("found RBAC network filter but failed to parse: %s", err)
@@ -216,9 +179,9 @@ func (l *ParsedListener) print(w io.Writer, printAll bool) {
 
 		cert := "none"
 		mTLSEnabled := "no"
-		if tls := fc.tlsContext; tls != nil {
-			cert = getCertificate(tls.GetCommonTlsContext())
-			if tls.RequireClientCertificate.GetValue() {
+		if tlscontext := fc.tlsContext; tlscontext != nil {
+			cert = getCertificate(tlscontext.GetCommonTlsContext())
+			if tlscontext.RequireClientCertificate.GetValue() {
 				mTLSEnabled = "yes"
 			}
 		}
@@ -239,21 +202,6 @@ func (l *ParsedListener) print(w io.Writer, printAll bool) {
 		}
 		mTLS := fmt.Sprintf("%s (%s)", mTLSEnabled, mTLSMode)
 
-		jwtPolicy := "no (none)"
-		if fc.istioJWT != nil || fc.envoyJWT != nil {
-			jwtPolicy = "yes (none)"
-			issuers := make([]string, 0)
-			for _, rule := range fc.istioJWT.GetRules() {
-				issuers = append(issuers, rule.Issuer)
-			}
-			for _, rule := range fc.envoyJWT.GetProviders() {
-				issuers = append(issuers, rule.Issuer)
-			}
-			if len(issuers) != 0 {
-				jwtPolicy = fmt.Sprintf("yes (%d: %s)", len(issuers), strings.Join(issuers, ", "))
-			}
-		}
-
 		rbacPolicy := "no (none)"
 		if fc.rbacHTTP != nil || fc.rbacTCP != nil {
 			rbacPolicy = "yes (none)"
@@ -271,11 +219,11 @@ func (l *ParsedListener) print(w io.Writer, printAll bool) {
 
 		var err error
 		if printAll {
-			_, err = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-				listenerName, fc.routeHTTP, sni, alpn, cert, mTLS, jwtPolicy, rbacPolicy)
+			_, err = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				listenerName, fc.routeHTTP, sni, alpn, cert, mTLS, rbacPolicy)
 		} else {
-			_, err = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-				listenerName, cert, mTLS, jwtPolicy, rbacPolicy)
+			_, err = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
+				listenerName, cert, mTLS, rbacPolicy)
 		}
 		if err != nil {
 			log.Errorf("failed to print output: %s", err)
@@ -286,9 +234,9 @@ func (l *ParsedListener) print(w io.Writer, printAll bool) {
 
 func PrintParsedListeners(writer io.Writer, parsedListeners []*ParsedListener, printAll bool) {
 	w := new(tabwriter.Writer).Init(writer, 0, 8, 5, ' ', 0)
-	col := "LISTENER[FilterChain]\tHTTP ROUTE\tSNI\tALPN\tCERTIFICATE\tmTLS (MODE)\tJWT (ISSUERS)\tAuthZ (RULES)"
+	col := "LISTENER[FilterChain]\tHTTP ROUTE\tSNI\tALPN\tCERTIFICATE\tmTLS (MODE)\tAuthZ (RULES)"
 	if !printAll {
-		col = "LISTENER[FilterChain]\tCERTIFICATE\tmTLS (MODE)\tJWT (ISSUERS)\tAuthZ (RULES)"
+		col = "LISTENER[FilterChain]\tCERTIFICATE\tmTLS (MODE)\tAuthZ (RULES)"
 	}
 
 	if _, err := fmt.Fprintln(w, col); err != nil {

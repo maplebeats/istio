@@ -1,4 +1,4 @@
-//  Copyright 2019 Istio Authors
+//  Copyright Istio Authors
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
 //  you may not use this file except in compliance with the License.
@@ -23,8 +23,9 @@ import (
 	"strings"
 	"sync"
 
-	"istio.io/istio/pkg/test/framework/components/environment/api"
-	"istio.io/istio/pkg/test/framework/core"
+	"istio.io/istio/pkg/test/framework/features"
+	"istio.io/istio/pkg/test/util/yml"
+
 	"istio.io/istio/pkg/test/framework/label"
 	"istio.io/istio/pkg/test/framework/resource"
 	"istio.io/istio/pkg/test/scopes"
@@ -39,10 +40,13 @@ var _ SuiteContext = &suiteContext{}
 
 // suiteContext contains suite-level items used during runtime.
 type suiteContext struct {
-	settings    *core.Settings
+	settings    *resource.Settings
 	environment resource.Environment
 
+	skipped bool
+
 	workDir string
+	yml.FileWriter
 
 	// context-level resources
 	globalScope *scope
@@ -51,9 +55,12 @@ type suiteContext struct {
 	contextNames map[string]struct{}
 
 	suiteLabels label.Set
+
+	outcomeMu    sync.RWMutex
+	testOutcomes []TestOutcome
 }
 
-func newSuiteContext(s *core.Settings, envFn api.FactoryFn, labels label.Set) (*suiteContext, error) {
+func newSuiteContext(s *resource.Settings, envFn resource.EnvironmentFactory, labels label.Set) (*suiteContext, error) {
 	scopeID := fmt.Sprintf("[suite(%s)]", s.TestID)
 
 	workDir := path.Join(s.RunDir(), "_suite_context")
@@ -64,11 +71,12 @@ func newSuiteContext(s *core.Settings, envFn api.FactoryFn, labels label.Set) (*
 		settings:     s,
 		globalScope:  newScope(scopeID, nil),
 		workDir:      workDir,
+		FileWriter:   yml.NewFileWriter(workDir),
 		suiteLabels:  labels,
 		contextNames: make(map[string]struct{}),
 	}
 
-	env, err := envFn(s.Environment, c)
+	env, err := envFn(c)
 	if err != nil {
 		return nil, err
 	}
@@ -123,13 +131,20 @@ func (s *suiteContext) TrackResource(r resource.Resource) resource.ID {
 	return rid
 }
 
-// Environment implements ResourceContext
+func (s *suiteContext) GetResource(ref interface{}) error {
+	return s.globalScope.get(ref)
+}
+
 func (s *suiteContext) Environment() resource.Environment {
 	return s.environment
 }
 
+func (s *suiteContext) Clusters() resource.Clusters {
+	return s.Environment().Clusters()
+}
+
 // Settings returns the current runtime.Settings.
-func (s *suiteContext) Settings() *core.Settings {
+func (s *suiteContext) Settings() *resource.Settings {
 	return s.settings
 }
 
@@ -156,8 +171,50 @@ func (s *suiteContext) CreateTmpDirectory(prefix string) (string, error) {
 		scopes.Framework.Errorf("Error creating temp dir: runID='%s', prefix='%s', workDir='%v', err='%v'",
 			s.settings.RunID, prefix, s.workDir, err)
 	} else {
-		scopes.Framework.Debugf("Created a temp dir: runID='%s', name='%s'", s.settings.RunID, dir)
+		scopes.Framework.Debugf("Created a temp dir: runID='%s', Name='%s'", s.settings.RunID, dir)
 	}
 
 	return dir, err
+}
+
+func (s *suiteContext) Config(clusters ...resource.Cluster) resource.ConfigManager {
+	return newConfigManager(s, clusters)
+}
+
+type Outcome string
+
+const (
+	Passed         Outcome = "Passed"
+	Failed         Outcome = "Failed"
+	Skipped        Outcome = "Skipped"
+	NotImplemented Outcome = "NotImplemented"
+)
+
+type TestOutcome struct {
+	Name          string
+	Type          string
+	Outcome       Outcome
+	FeatureLabels map[features.Feature][]string
+}
+
+func (s *suiteContext) registerOutcome(test *testImpl) {
+	s.outcomeMu.Lock()
+	defer s.outcomeMu.Unlock()
+	o := Passed
+	if test.notImplemented {
+		o = NotImplemented
+	} else if test.goTest.Failed() {
+		o = Failed
+	} else if test.goTest.Skipped() {
+		o = Skipped
+	}
+	newOutcome := TestOutcome{
+		Name:          test.goTest.Name(),
+		Type:          "integration",
+		Outcome:       o,
+		FeatureLabels: test.featureLabels,
+	}
+	s.contextMu.Lock()
+	defer s.contextMu.Unlock()
+	s.testOutcomes = append(s.testOutcomes, newOutcome)
 }

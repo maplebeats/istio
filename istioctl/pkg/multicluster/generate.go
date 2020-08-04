@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors.
+// Copyright Istio Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,7 +20,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gogo/protobuf/types"
 	"github.com/golang/sync/errgroup"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -28,6 +27,7 @@ import (
 
 	"istio.io/api/mesh/v1alpha1"
 	iop "istio.io/api/operator/v1alpha1"
+
 	operatorV1alpha1 "istio.io/istio/operator/pkg/apis/istio/v1alpha1"
 	"istio.io/istio/operator/pkg/util"
 	"istio.io/istio/operator/pkg/validate"
@@ -37,18 +37,7 @@ import (
 )
 
 // defaults the user can override
-func defaultControlPlane() (*operatorV1alpha1.IstioOperator, error) {
-	typedValues := &operatorV1alpha1.Values{
-		Security: &operatorV1alpha1.SecurityConfig{
-			SelfSigned: &types.BoolValue{Value: false},
-		},
-	}
-
-	typedValuesJSON, err := protomarshal.ToJSONMap(typedValues)
-	if err != nil {
-		return nil, err
-	}
-
+func defaultControlPlane() *operatorV1alpha1.IstioOperator {
 	return &operatorV1alpha1.IstioOperator{
 		Kind:       "IstioOperator",
 		ApiVersion: "install.istio.io/v1alpha1",
@@ -57,9 +46,8 @@ func defaultControlPlane() (*operatorV1alpha1.IstioOperator, error) {
 		},
 		Spec: &iop.IstioOperatorSpec{
 			Profile: "default",
-			Values:  typedValuesJSON,
 		},
-	}, nil
+	}
 }
 
 // overlay configuration which will override user config.
@@ -83,15 +71,11 @@ func overlayIstioControlPlane(mesh *Mesh, current *Cluster, meshNetworks *v1alph
 			},
 		},
 		Global: &operatorV1alpha1.GlobalConfig{
-			ControlPlaneSecurityEnabled: &types.BoolValue{Value: true},
-			MeshNetworks:                meshNetworksJSON,
+			MeshNetworks: meshNetworksJSON,
 			MultiCluster: &operatorV1alpha1.MultiClusterConfig{
 				ClusterName: current.clusterName,
 			},
 			Network: current.Network,
-		},
-		Pilot: &operatorV1alpha1.PilotConfig{
-			MeshNetworks: meshNetworksJSON,
 		},
 	}
 
@@ -129,11 +113,7 @@ func generateIstioControlPlane(mesh *Mesh, current *Cluster, meshNetworks *v1alp
 		}
 		base = &user
 	} else {
-		var err error
-		base, err = defaultControlPlane()
-		if err != nil {
-			return "", err
-		}
+		base = defaultControlPlane()
 	}
 
 	overlay, err := overlayIstioControlPlane(mesh, current, meshNetworks)

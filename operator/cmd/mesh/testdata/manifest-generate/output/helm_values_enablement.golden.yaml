@@ -19,6 +19,9 @@ spec:
   template:
     metadata:
       annotations:
+        prometheus.io/path: /stats/prometheus
+        prometheus.io/port: "15090"
+        prometheus.io/scrape: "true"
         sidecar.istio.io/inject: "false"
       labels:
         app: istio-egressgateway
@@ -34,21 +37,21 @@ spec:
           preferredDuringSchedulingIgnoredDuringExecution:
           - preference:
               matchExpressions:
-              - key: beta.kubernetes.io/arch
+              - key: kubernetes.io/arch
                 operator: In
                 values:
                 - amd64
             weight: 2
           - preference:
               matchExpressions:
-              - key: beta.kubernetes.io/arch
+              - key: kubernetes.io/arch
                 operator: In
                 values:
                 - ppc64le
             weight: 2
           - preference:
               matchExpressions:
-              - key: beta.kubernetes.io/arch
+              - key: kubernetes.io/arch
                 operator: In
                 values:
                 - s390x
@@ -56,7 +59,7 @@ spec:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
             - matchExpressions:
-              - key: beta.kubernetes.io/arch
+              - key: kubernetes.io/arch
                 operator: In
                 values:
                 - amd64
@@ -71,30 +74,16 @@ spec:
         - --proxyLogLevel=warning
         - --proxyComponentLogLevel=misc:error
         - --log_output_level=default:info
-        - --drainDuration
-        - 45s
-        - --parentShutdownDuration
-        - 1m0s
-        - --connectTimeout
-        - 10s
         - --serviceCluster
         - istio-egressgateway
-        - --zipkinAddress
-        - zipkin.istio-system:9411
-        - --proxyAdminPort
-        - "15000"
-        - --statusPort
-        - "15020"
-        - --controlPlaneAuthPolicy
-        - NONE
-        - --discoveryAddress
-        - istio-pilot.istio-system.svc:15012
         - --trust-domain=cluster.local
         env:
         - name: JWT_POLICY
           value: third-party-jwt
         - name: PILOT_CERT_PROVIDER
           value: istiod
+        - name: CA_ADDR
+          value: istiod.istio-system.svc:15012
         - name: NODE_NAME
           valueFrom:
             fieldRef:
@@ -124,23 +113,20 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: spec.serviceAccountName
+        - name: CANONICAL_SERVICE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.labels['service.istio.io/canonical-name']
+        - name: CANONICAL_REVISION
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.labels['service.istio.io/canonical-revision']
         - name: ISTIO_META_WORKLOAD_NAME
           value: istio-egressgateway
         - name: ISTIO_META_OWNER
           value: kubernetes://apis/apps/v1/namespaces/istio-system/deployments/istio-egressgateway
         - name: ISTIO_META_MESH_ID
           value: cluster.local
-        - name: ISTIO_AUTO_MTLS_ENABLED
-          value: "true"
-        - name: ISTIO_META_POD_NAME
-          valueFrom:
-            fieldRef:
-              apiVersion: v1
-              fieldPath: metadata.name
-        - name: ISTIO_META_CONFIG_NAMESPACE
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.namespace
         - name: ISTIO_META_ROUTER_MODE
           value: sni-dnat
         - name: ISTIO_META_CLUSTER_ID
@@ -158,7 +144,7 @@ spec:
           failureThreshold: 30
           httpGet:
             path: /healthz/ready
-            port: 15020
+            port: 15021
             scheme: HTTP
           initialDelaySeconds: 1
           periodSeconds: 2
@@ -171,7 +157,16 @@ spec:
           requests:
             cpu: 100m
             memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
         volumeMounts:
+        - mountPath: /etc/istio/proxy
+          name: istio-envoy
         - mountPath: /etc/istio/config
           name: config-volume
         - mountPath: /var/run/secrets/istio
@@ -179,6 +174,8 @@ spec:
         - mountPath: /var/run/secrets/tokens
           name: istio-token
           readOnly: true
+        - mountPath: /var/run/ingress_gateway
+          name: gatewaysdsudspath
         - mountPath: /etc/istio/pod
           name: podinfo
         - mountPath: /etc/istio/egressgateway-certs
@@ -187,6 +184,11 @@ spec:
         - mountPath: /etc/istio/egressgateway-ca-certs
           name: egressgateway-ca-certs
           readOnly: true
+      securityContext:
+        fsGroup: 1337
+        runAsGroup: 1337
+        runAsNonRoot: true
+        runAsUser: 1337
       serviceAccountName: istio-egressgateway-service-account
       volumes:
       - configMap:
@@ -201,6 +203,10 @@ spec:
               fieldPath: metadata.annotations
             path: annotations
         name: podinfo
+      - emptyDir: {}
+        name: istio-envoy
+      - emptyDir: {}
+        name: gatewaysdsudspath
       - name: istio-token
         projected:
           sources:
@@ -223,164 +229,27 @@ spec:
 ---
 
 
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: kiali
-  namespace: istio-system
-  labels:
-    app: kiali
-    release: istio
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: kiali
-  template:
-    metadata:
-      name: kiali
-      labels:
-        app: kiali
-        release: istio
-      annotations:
-        sidecar.istio.io/inject: "false"
-        scheduler.alpha.kubernetes.io/critical-pod: ""
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "9090"
-        kiali.io/runtimes: go,kiali
-    spec:
-      serviceAccountName: kiali-service-account
-      containers:
-      - image: "quay.io/kiali/kiali:v1.14"
-        name: kiali
-        command:
-        - "/opt/kiali/kiali"
-        - "-config"
-        - "/kiali-configuration/config.yaml"
-        - "-v"
-        - "3"
-        readinessProbe:
-          httpGet:
-            path: /kiali/healthz
-            port: 20001
-            scheme: 'HTTP'
-          initialDelaySeconds: 5
-          periodSeconds: 30
-        livenessProbe:
-          httpGet:
-            path: /kiali/healthz
-            port: 20001
-            scheme: 'HTTP'
-          initialDelaySeconds: 5
-          periodSeconds: 30
-        env:
-        - name: ACTIVE_NAMESPACE
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.namespace
-        volumeMounts:
-        - name: kiali-configuration
-          mountPath: "/kiali-configuration"
-        - name: kiali-cert
-          mountPath: "/kiali-cert"
-        - name: kiali-secret
-          mountPath: "/kiali-secret"
-        resources:
-          requests:
-            cpu: 10m
-          
-      volumes:
-      - name: kiali-configuration
-        configMap:
-          name: kiali
-      - name: kiali-cert
-        secret:
-          secretName: istio.kiali-service-account
-          optional: true      
-      - name: kiali-secret
-        secret:
-          secretName: kiali
-          optional: true
-      affinity:      
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-            - matchExpressions:
-              - key: beta.kubernetes.io/arch
-                operator: In
-                values:
-                - "amd64"
-                - "ppc64le"
-                - "s390x"
-          preferredDuringSchedulingIgnoredDuringExecution:
-          - weight: 2
-            preference:
-              matchExpressions:
-              - key: beta.kubernetes.io/arch
-                operator: In
-                values:
-                - "amd64"
-          - weight: 2
-            preference:
-              matchExpressions:
-              - key: beta.kubernetes.io/arch
-                operator: In
-                values:
-                - "ppc64le"
-          - weight: 2
-            preference:
-              matchExpressions:
-              - key: beta.kubernetes.io/arch
-                operator: In
-                values:
-                - "s390x"
----
-
-
 apiVersion: v1
 kind: Service
 metadata:
+  annotations: null
+  labels:
+    app: istio-egressgateway
+    istio: egressgateway
+    release: istio
   name: istio-egressgateway
   namespace: istio-system
-  annotations:
-  labels:
+spec:
+  ports:
+  - name: http2
+    port: 80
+  - name: https
+    port: 443
+  - name: tls
+    port: 15443
+    targetPort: 15443
+  selector:
     app: istio-egressgateway
     istio: egressgateway
-    
-    release: istio
-spec:
   type: ClusterIP
-  selector:
-    app: istio-egressgateway
-    istio: egressgateway
-    
-  ports:
-    -
-      name: http2
-      port: 80
-    -
-      name: https
-      port: 443
-    -
-      name: tls
-      port: 15443
-      targetPort: 15443
----
-
-
-apiVersion: v1
-kind: Service
-metadata:
-  name: kiali
-  namespace: istio-system
-  labels:
-    app: kiali
-    release: istio
-spec:
-  ports:
-    - name: http-kiali
-      protocol: TCP
-      port: 20001
-  selector:
-    app: kiali
 ---

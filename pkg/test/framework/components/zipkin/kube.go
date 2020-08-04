@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,10 +21,12 @@ import (
 	"io"
 	"io/ioutil"
 	"net/http"
+	"path/filepath"
 	"sort"
 	"time"
 
-	"istio.io/istio/pkg/test/framework/components/environment/kube"
+	istioKube "istio.io/istio/pkg/kube"
+	"istio.io/istio/pkg/test/env"
 	"istio.io/istio/pkg/test/framework/components/istio"
 	"istio.io/istio/pkg/test/framework/resource"
 	testKube "istio.io/istio/pkg/test/kube"
@@ -45,14 +47,39 @@ var (
 type kubeComponent struct {
 	id        resource.ID
 	address   string
-	forwarder testKube.PortForwarder
-	env       *kube.Environment
+	forwarder istioKube.PortForwarder
+	cluster   resource.Cluster
+	close     func()
 }
 
-func newKube(ctx resource.Context) (Instance, error) {
-	env := ctx.Environment().(*kube.Environment)
+func getZipkinYaml() (string, error) {
+	yamlBytes, err := ioutil.ReadFile(filepath.Join(env.IstioSrc, "samples/addons/extras/zipkin.yaml"))
+	if err != nil {
+		return "", err
+	}
+	yaml := string(yamlBytes)
+	return yaml, nil
+}
+
+func installZipkin(ctx resource.Context, ns string) error {
+	yaml, err := getZipkinYaml()
+	if err != nil {
+		return err
+	}
+	return ctx.Config().ApplyYAML(ns, yaml)
+}
+
+func removeZipkin(ctx resource.Context, ns string) error {
+	yaml, err := getZipkinYaml()
+	if err != nil {
+		return err
+	}
+	return ctx.Config().DeleteYAML(ns, yaml)
+}
+
+func newKube(ctx resource.Context, cfgIn Config) (Instance, error) {
 	c := &kubeComponent{
-		env: env,
+		cluster: ctx.Clusters().GetOrDefault(cfgIn.Cluster),
 	}
 	c.id = ctx.TrackResource(c)
 
@@ -62,14 +89,22 @@ func newKube(ctx resource.Context) (Instance, error) {
 		return nil, err
 	}
 
-	fetchFn := env.Accessor.NewSinglePodFetch(cfg.SystemNamespace, fmt.Sprintf("app=%s", appName))
-	pods, err := env.Accessor.WaitUntilPodsAreReady(fetchFn)
+	if err := installZipkin(ctx, cfg.TelemetryNamespace); err != nil {
+		return nil, err
+	}
+
+	c.close = func() {
+		_ = removeZipkin(ctx, cfg.TelemetryNamespace)
+	}
+
+	fetchFn := testKube.NewSinglePodFetch(c.cluster, cfg.SystemNamespace, fmt.Sprintf("app=%s", appName))
+	pods, err := testKube.WaitUntilPodsAreReady(fetchFn)
 	if err != nil {
 		return nil, err
 	}
 	pod := pods[0]
 
-	forwarder, err := env.Accessor.NewPortForwarder(pod, 0, zipkinPort)
+	forwarder, err := c.cluster.NewPortForwarder(pod.Name, pod.Namespace, "", 0, zipkinPort)
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +152,11 @@ func (c *kubeComponent) QueryTraces(limit int, spanName, annotationQuery string)
 
 // Close implements io.Closer.
 func (c *kubeComponent) Close() error {
-	return c.forwarder.Close()
+	if c.close != nil {
+		c.close()
+	}
+	c.forwarder.Close()
+	return nil
 }
 
 func extractTraces(resp []byte) ([]Trace, error) {

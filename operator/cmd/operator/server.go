@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,18 +17,18 @@ package main
 import (
 	"fmt"
 	"os"
-
-	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
-	_ "k8s.io/client-go/plugin/pkg/client/auth"
+	"strings"
 
 	"github.com/spf13/cobra"
+	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
+	_ "k8s.io/client-go/plugin/pkg/client/auth"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
 
 	"istio.io/istio/operator/pkg/apis"
 	"istio.io/istio/operator/pkg/controller"
-	"istio.io/istio/operator/pkg/controller/istiocontrolplane"
 	"istio.io/pkg/ctrlz"
 	"istio.io/pkg/log"
 )
@@ -65,7 +65,6 @@ func serverCmd() *cobra.Command {
 
 	loggingOptions.AttachCobraFlags(serverCmd)
 	introspectionOptions.AttachCobraFlags(serverCmd)
-	istiocontrolplane.AttachCobraFlags(serverCmd)
 
 	return serverCmd
 }
@@ -101,14 +100,35 @@ func run() {
 		log.Fatalf("Could not get apiserver config: %v", err)
 	}
 
+	var mgrOpt manager.Options
+	leaderElectionID := "istio-operator-lock"
+	if operatorRevision, found := os.LookupEnv("REVISION"); found && operatorRevision != "" {
+		leaderElectionID += "-" + operatorRevision
+	}
+	log.Infof("leader election cm: %s", leaderElectionID)
+	if watchNS != "" {
+		namespaces := strings.Split(watchNS, ",")
+		// Create MultiNamespacedCache with watched namespaces if it's not empty.
+		mgrOpt = manager.Options{
+			NewCache:                cache.MultiNamespacedCacheBuilder(namespaces),
+			MetricsBindAddress:      fmt.Sprintf("%s:%d", metricsHost, metricsPort),
+			LeaderElection:          leaderElectionEnabled,
+			LeaderElectionNamespace: leaderElectionNS,
+			LeaderElectionID:        leaderElectionID,
+		}
+	} else {
+		// Create manager option for watching all namespaces.
+		mgrOpt = manager.Options{
+			Namespace:               watchNS,
+			MetricsBindAddress:      fmt.Sprintf("%s:%d", metricsHost, metricsPort),
+			LeaderElection:          leaderElectionEnabled,
+			LeaderElectionNamespace: leaderElectionNS,
+			LeaderElectionID:        leaderElectionID,
+		}
+	}
+
 	// Create a new Cmd to provide shared dependencies and start components
-	mgr, err := manager.New(cfg, manager.Options{
-		Namespace:               watchNS,
-		MetricsBindAddress:      fmt.Sprintf("%s:%d", metricsHost, metricsPort),
-		LeaderElection:          leaderElectionEnabled,
-		LeaderElectionNamespace: leaderElectionNS,
-		LeaderElectionID:        "istio-operator-lock",
-	})
+	mgr, err := manager.New(cfg, mgrOpt)
 	if err != nil {
 		log.Fatalf("Could not create a controller manager: %v", err)
 	}

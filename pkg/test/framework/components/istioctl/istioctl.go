@@ -1,4 +1,4 @@
-//  Copyright 2019 Istio Authors
+//  Copyright Istio Authors
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
 //  you may not use this file except in compliance with the License.
@@ -15,55 +15,49 @@
 package istioctl
 
 import (
+	"fmt"
 	"testing"
 
 	"istio.io/istio/pkg/test"
-	"istio.io/istio/pkg/test/framework/components/environment"
 	"istio.io/istio/pkg/test/framework/resource"
 )
 
 // Instance represents "istioctl"
 type Instance interface {
+	// WaitForConfigs will wait until all passed in config has been distributed
+	WaitForConfigs(defaultNamespace string, configs string) error
+
 	// Invoke invokes an istioctl command and returns the output and exception.
-	// Cobra commands don't make it easy to separate stdout and stderr and the string parameter
-	// will receive both.
-	Invoke(args []string) (string, error)
+	// stdout and stderr will be returned as different strings
+	Invoke(args []string) (string, string, error)
 
 	// InvokeOrFail calls Invoke and fails tests if it returns en err
-	InvokeOrFail(t *testing.T, args []string) string
+	InvokeOrFail(t *testing.T, args []string) (string, string)
 }
 
 // Config is structured config for the istioctl component
 type Config struct {
-	// currently nothing, we might add stuff like OS env settings later
+	// Cluster to be used in a multicluster environment
+	Cluster resource.Cluster
 }
 
 // New returns a new instance of "istioctl".
 func New(ctx resource.Context, cfg Config) (i Instance, err error) {
-	err = resource.UnsupportedEnvironment(ctx.Environment())
-	ctx.Environment().Case(environment.Native, func() {
-		i = newNative(ctx, cfg)
-		err = nil
-	})
-	ctx.Environment().Case(environment.Kube, func() {
-		i = newKube(ctx, cfg)
-		err = nil
-	})
-
-	return
+	return newKube(ctx, cfg), nil
 }
 
 // NewOrFail returns a new instance of "istioctl".
-func NewOrFail(_ *testing.T, c resource.Context, config Config) Instance {
-	failer, ok := c.(test.Failer)
-	if !ok {
-		panic("context must be a Failer (typically a framework.TestContext)")
-	}
-
+func NewOrFail(t test.Failer, c resource.Context, config Config) Instance {
 	i, err := New(c, config)
 	if err != nil {
-		failer.Fatalf("istioctl.NewOrFail:: %v", err)
+		t.Fatalf("istioctl.NewOrFail:: %v", err)
 	}
 
 	return i
+}
+
+func (c *Config) String() string {
+	result := ""
+	result += fmt.Sprintf("Cluster:                      %s\n", c.Cluster)
+	return result
 }

@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package diag
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"istio.io/istio/pkg/config/resource"
 )
@@ -46,6 +47,7 @@ func (m *MessageType) Code() string { return m.code }
 func (m *MessageType) Template() string { return m.template }
 
 // Message is a specific diagnostic message
+// TODO: Implement using Analysis message API
 type Message struct {
 	Type *MessageType
 
@@ -68,6 +70,9 @@ func (m *Message) Unstructured(includeOrigin bool) map[string]interface{} {
 	result["level"] = m.Type.Level().String()
 	if includeOrigin && m.Resource != nil {
 		result["origin"] = m.Resource.Origin.FriendlyName()
+		if m.Resource.Origin.Reference() != nil {
+			result["reference"] = m.Resource.Origin.Reference().String()
+		}
 	}
 	result["message"] = fmt.Sprintf(m.Type.Template(), m.Parameters...)
 
@@ -75,7 +80,7 @@ func (m *Message) Unstructured(includeOrigin bool) map[string]interface{} {
 	if m.DocRef != "" {
 		docQueryString = fmt.Sprintf("?ref=%s", m.DocRef)
 	}
-	result["documentation_url"] = fmt.Sprintf("%s/%s%s", DocPrefix, m.Type.Code(), docQueryString)
+	result["documentation_url"] = fmt.Sprintf("%s/%s/%s", DocPrefix, strings.ToLower(m.Type.Code()), docQueryString)
 
 	return result
 }
@@ -84,7 +89,11 @@ func (m *Message) Unstructured(includeOrigin bool) map[string]interface{} {
 func (m *Message) String() string {
 	origin := ""
 	if m.Resource != nil {
-		origin = "(" + m.Resource.Origin.FriendlyName() + ")"
+		loc := ""
+		if m.Resource.Origin.Reference() != nil {
+			loc = " " + m.Resource.Origin.Reference().String()
+		}
+		origin = " (" + m.Resource.Origin.FriendlyName() + loc + ")"
 	}
 	return fmt.Sprintf(
 		"%v [%v]%s %s", m.Type.Level(), m.Type.Code(), origin, fmt.Sprintf(m.Type.Template(), m.Parameters...))

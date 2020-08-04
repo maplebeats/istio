@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -51,6 +51,14 @@ func TestLabels(t *testing.T) {
 		{filter: "postsubmit,postsubmit", labels: NewSet(Postsubmit), expected: true},
 		{filter: "postsubmit,postsubmit", labels: NewSet(), expected: false},
 		{filter: "postsubmit,-postsubmit", labels: NewSet(), err: true},
+		{filter: "multicluster", labels: NewSet(Multicluster), expected: true},
+		{filter: "multicluster", labels: NewSet(CustomSetup), expected: false},
+		{filter: "multicluster", labels: NewSet(CustomSetup, Multicluster), expected: true},
+		{filter: "multicluster,customsetup", labels: NewSet(Multicluster, CustomSetup), expected: true},
+		{filter: "multicluster,customsetup", labels: NewSet(Multicluster), expected: false},
+		{filter: "+multicluster,+customsetup", labels: NewSet(Multicluster), expected: false},
+		{filter: "-multicluster", labels: NewSet(), expected: true},
+		{filter: "-multicluster", labels: NewSet(Multicluster), expected: false},
 	}
 
 	for i, te := range tests {

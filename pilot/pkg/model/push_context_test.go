@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,22 +21,21 @@ import (
 	"testing"
 	"time"
 
-	"istio.io/pkg/ledger"
+	. "github.com/onsi/gomega"
 
-	authn "istio.io/api/authentication/v1alpha1"
 	meshconfig "istio.io/api/mesh/v1alpha1"
 	networking "istio.io/api/networking/v1alpha3"
 	securityBeta "istio.io/api/security/v1beta1"
 	selectorpb "istio.io/api/type/v1beta1"
 
-	"istio.io/istio/pilot/pkg/model/test"
 	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/config/host"
 	"istio.io/istio/pkg/config/labels"
 	"istio.io/istio/pkg/config/mesh"
-	"istio.io/istio/pkg/config/schema/collection"
 	"istio.io/istio/pkg/config/schema/collections"
+	"istio.io/istio/pkg/config/schema/gvk"
 	"istio.io/istio/pkg/config/schema/resource"
+	"istio.io/istio/pkg/config/visibility"
 )
 
 func TestMergeUpdateRequest(t *testing.T) {
@@ -68,65 +67,37 @@ func TestMergeUpdateRequest(t *testing.T) {
 		{
 			"simple merge",
 			&PushRequest{
-				Full:               true,
-				Push:               push0,
-				Start:              t0,
-				NamespacesUpdated:  map[string]struct{}{"ns1": {}},
-				ConfigTypesUpdated: map[resource.GroupVersionKind]struct{}{{Kind: "cfg1"}: {}},
-				Reason:             []TriggerReason{ServiceUpdate, ServiceUpdate},
+				Full:  true,
+				Push:  push0,
+				Start: t0,
+				ConfigsUpdated: map[ConfigKey]struct{}{
+					{Kind: resource.GroupVersionKind{Kind: "cfg1"}, Namespace: "ns1"}: {}},
+				Reason: []TriggerReason{ServiceUpdate, ServiceUpdate},
 			},
 			&PushRequest{
-				Full:               false,
-				Push:               push1,
-				Start:              t1,
-				NamespacesUpdated:  map[string]struct{}{"ns2": {}},
-				ConfigTypesUpdated: map[resource.GroupVersionKind]struct{}{{Kind: "cfg2"}: {}},
-				Reason:             []TriggerReason{EndpointUpdate},
+				Full:  false,
+				Push:  push1,
+				Start: t1,
+				ConfigsUpdated: map[ConfigKey]struct{}{
+					{Kind: resource.GroupVersionKind{Kind: "cfg2"}, Namespace: "ns2"}: {}},
+				Reason: []TriggerReason{EndpointUpdate},
 			},
 			PushRequest{
-				Full:               true,
-				Push:               push1,
-				Start:              t0,
-				NamespacesUpdated:  map[string]struct{}{"ns1": {}, "ns2": {}},
-				ConfigTypesUpdated: map[resource.GroupVersionKind]struct{}{{Kind: "cfg1"}: {}, {Kind: "cfg2"}: {}},
-				Reason:             []TriggerReason{ServiceUpdate, ServiceUpdate, EndpointUpdate},
+				Full:  true,
+				Push:  push1,
+				Start: t0,
+				ConfigsUpdated: map[ConfigKey]struct{}{
+					{Kind: resource.GroupVersionKind{Kind: "cfg1"}, Namespace: "ns1"}: {},
+					{Kind: resource.GroupVersionKind{Kind: "cfg2"}, Namespace: "ns2"}: {}},
+				Reason: []TriggerReason{ServiceUpdate, ServiceUpdate, EndpointUpdate},
 			},
-		},
-		{
-			"incremental eds merge",
-			&PushRequest{Full: false, EdsUpdates: map[string]struct{}{"svc-1": {}}},
-			&PushRequest{Full: false, EdsUpdates: map[string]struct{}{"svc-2": {}}},
-			PushRequest{Full: false, EdsUpdates: map[string]struct{}{"svc-1": {}, "svc-2": {}}},
-		},
-		{
-			"skip eds merge: left full",
-			&PushRequest{Full: true},
-			&PushRequest{Full: false, EdsUpdates: map[string]struct{}{"svc-2": {}}},
-			PushRequest{Full: true},
-		},
-		{
-			"skip eds merge: right full",
-			&PushRequest{Full: false, EdsUpdates: map[string]struct{}{"svc-1": {}}},
-			&PushRequest{Full: true},
-			PushRequest{Full: true},
-		},
-		{
-			"incremental merge",
-			&PushRequest{Full: false, NamespacesUpdated: map[string]struct{}{"ns1": {}}, EdsUpdates: map[string]struct{}{"svc-1": {}}},
-			&PushRequest{Full: false, NamespacesUpdated: map[string]struct{}{"ns2": {}}, EdsUpdates: map[string]struct{}{"svc-2": {}}},
-			PushRequest{Full: false, NamespacesUpdated: map[string]struct{}{"ns1": {}, "ns2": {}}, EdsUpdates: map[string]struct{}{"svc-1": {}, "svc-2": {}}},
-		},
-		{
-			"skip namespace merge: one empty",
-			&PushRequest{Full: true, NamespacesUpdated: nil},
-			&PushRequest{Full: true, NamespacesUpdated: map[string]struct{}{"ns2": {}}},
-			PushRequest{Full: true, NamespacesUpdated: nil},
 		},
 		{
 			"skip config type merge: one empty",
-			&PushRequest{Full: true, ConfigTypesUpdated: nil},
-			&PushRequest{Full: true, ConfigTypesUpdated: map[resource.GroupVersionKind]struct{}{{Kind: "cfg2"}: {}}},
-			PushRequest{Full: true, ConfigTypesUpdated: nil},
+			&PushRequest{Full: true, ConfigsUpdated: nil},
+			&PushRequest{Full: true, ConfigsUpdated: map[ConfigKey]struct{}{{
+				Kind: resource.GroupVersionKind{Kind: "cfg2"}}: {}}},
+			PushRequest{Full: true, ConfigsUpdated: nil},
 		},
 	}
 
@@ -137,334 +108,6 @@ func TestMergeUpdateRequest(t *testing.T) {
 				t.Fatalf("expected %v, got %v", tt.merged, got)
 			}
 		})
-	}
-}
-
-func TestAuthNPolicies(t *testing.T) {
-	const testNamespace string = "test-namespace"
-	ps := NewPushContext()
-	env := &Environment{Watcher: mesh.NewFixedWatcher(&meshconfig.MeshConfig{RootNamespace: "istio-system"})}
-	ps.Mesh = env.Mesh()
-	ps.ServiceDiscovery = env
-	authNPolicies := map[string]*authn.Policy{
-		constants.DefaultAuthenticationPolicyName: {},
-
-		"mtls-strict-svc": {
-			Targets: []*authn.TargetSelector{{
-				Name: "mtls-strict-svc-port",
-			}},
-			Peers: []*authn.PeerAuthenticationMethod{{
-				Params: &authn.PeerAuthenticationMethod_Mtls{},
-			},
-			}},
-
-		"mtls-strict-svc-port": {
-			Targets: []*authn.TargetSelector{{
-				Name: "mtls-strict-svc-port",
-				Ports: []*authn.PortSelector{
-					{
-						Port: &authn.PortSelector_Number{
-							Number: 80,
-						},
-					},
-				},
-			}},
-			Peers: []*authn.PeerAuthenticationMethod{{
-				Params: &authn.PeerAuthenticationMethod_Mtls{},
-			},
-			}},
-
-		"mtls-permissive-svc-port": {
-			Targets: []*authn.TargetSelector{{
-				Name: "mtls-permissive-svc-port",
-				Ports: []*authn.PortSelector{
-					{
-						Port: &authn.PortSelector_Number{
-							Number: 80,
-						},
-					},
-				},
-			}},
-			Peers: []*authn.PeerAuthenticationMethod{{
-				Params: &authn.PeerAuthenticationMethod_Mtls{
-					Mtls: &authn.MutualTls{
-						Mode: authn.MutualTls_PERMISSIVE,
-					},
-				},
-			}},
-		},
-
-		"mtls-strict-svc-named-port": {
-			Targets: []*authn.TargetSelector{{
-				Name: "mtls-strict-svc-named-port",
-				Ports: []*authn.PortSelector{
-					{
-						Port: &authn.PortSelector_Name{
-							Name: "http",
-						},
-					},
-				},
-			}},
-			Peers: []*authn.PeerAuthenticationMethod{{
-				Params: &authn.PeerAuthenticationMethod_Mtls{},
-			}},
-		},
-
-		"mtls-disable-svc": {
-			Targets: []*authn.TargetSelector{{
-				Name: "mtls-disable-svc",
-			}},
-		},
-	}
-	configStore := newFakeStore()
-	for key, value := range authNPolicies {
-		cfg := Config{
-			ConfigMeta: ConfigMeta{
-				Type:      collections.IstioAuthenticationV1Alpha1Policies.Resource().Kind(),
-				Group:     collections.IstioAuthenticationV1Alpha1Policies.Resource().Group(),
-				Version:   collections.IstioAuthenticationV1Alpha1Policies.Resource().Version(),
-				Name:      key,
-				Domain:    "cluster.local",
-				Namespace: testNamespace,
-			},
-			Spec: value,
-		}
-		if _, err := configStore.Create(cfg); err != nil {
-			t.Error(err)
-		}
-	}
-
-	// Add cluster-scoped policy
-	globalPolicy := &authn.Policy{
-		Peers: []*authn.PeerAuthenticationMethod{{
-			Params: &authn.PeerAuthenticationMethod_Mtls{
-				Mtls: &authn.MutualTls{
-					Mode: authn.MutualTls_PERMISSIVE,
-				},
-			},
-		}},
-	}
-	globalCfg := Config{
-		ConfigMeta: ConfigMeta{
-			Type:    collections.IstioAuthenticationV1Alpha1Meshpolicies.Resource().Kind(),
-			Group:   collections.IstioAuthenticationV1Alpha1Meshpolicies.Resource().Group(),
-			Version: collections.IstioAuthenticationV1Alpha1Meshpolicies.Resource().Version(),
-			Name:    constants.DefaultAuthenticationPolicyName,
-			Domain:  "cluster.local",
-		},
-		Spec: globalPolicy,
-	}
-	if _, err := configStore.Create(globalCfg); err != nil {
-		t.Error(err)
-	}
-
-	store := istioConfigStore{ConfigStore: configStore}
-	env.IstioConfigStore = &store
-	if err := ps.initAuthnPolicies(env); err != nil {
-		t.Fatalf("init authn policies failed: %v", err)
-	}
-
-	cases := []struct {
-		hostname                host.Name
-		namespace               string
-		port                    Port
-		expectedPolicy          *authn.Policy
-		expectedPolicyName      string
-		expectedPolicyNamespace string
-	}{
-		{
-			hostname:                "mtls-strict-svc-port.test-namespace.svc.cluster.local",
-			namespace:               testNamespace,
-			port:                    Port{Port: 80},
-			expectedPolicy:          authNPolicies["mtls-strict-svc-port"],
-			expectedPolicyName:      "mtls-strict-svc-port",
-			expectedPolicyNamespace: testNamespace,
-		},
-		{
-			hostname:                "mtls-strict-svc-port.test-namespace.svc.cluster.local",
-			namespace:               testNamespace,
-			port:                    Port{Port: 90},
-			expectedPolicy:          authNPolicies["mtls-strict-svc"],
-			expectedPolicyName:      "mtls-strict-svc",
-			expectedPolicyNamespace: testNamespace,
-		},
-		{
-			hostname:                "mtls-permissive-svc-port.test-namespace.svc.cluster.local",
-			namespace:               testNamespace,
-			port:                    Port{Port: 80},
-			expectedPolicy:          authNPolicies["mtls-permissive-svc-port"],
-			expectedPolicyName:      "mtls-permissive-svc-port",
-			expectedPolicyNamespace: testNamespace,
-		},
-		{
-			hostname:                "mtls-permissive-svc-port.test-namespace.svc.cluster.local",
-			namespace:               testNamespace,
-			port:                    Port{Port: 90},
-			expectedPolicy:          authNPolicies[constants.DefaultAuthenticationPolicyName],
-			expectedPolicyName:      constants.DefaultAuthenticationPolicyName,
-			expectedPolicyNamespace: testNamespace,
-		},
-		{
-			hostname:                "mtls-disable-svc.test-namespace.svc.cluster.local",
-			namespace:               testNamespace,
-			port:                    Port{Port: 80},
-			expectedPolicy:          authNPolicies["mtls-disable-svc"],
-			expectedPolicyName:      "mtls-disable-svc",
-			expectedPolicyNamespace: testNamespace,
-		},
-		{
-			hostname:                "mtls-strict-svc-port.another-namespace.svc.cluster.local",
-			namespace:               "another-namespace",
-			port:                    Port{Port: 80},
-			expectedPolicy:          globalPolicy,
-			expectedPolicyName:      constants.DefaultAuthenticationPolicyName,
-			expectedPolicyNamespace: NamespaceAll,
-		},
-		{
-			hostname:                "mtls-default-svc-port.test-namespace.svc.cluster.local",
-			namespace:               testNamespace,
-			port:                    Port{Port: 80},
-			expectedPolicy:          authNPolicies[constants.DefaultAuthenticationPolicyName],
-			expectedPolicyName:      constants.DefaultAuthenticationPolicyName,
-			expectedPolicyNamespace: testNamespace,
-		},
-		{
-			hostname:                "mtls-strict-svc-named-port.test-namespace.svc.cluster.local",
-			namespace:               testNamespace,
-			port:                    Port{Name: "http"},
-			expectedPolicy:          authNPolicies["mtls-strict-svc-named-port"],
-			expectedPolicyName:      "mtls-strict-svc-named-port",
-			expectedPolicyNamespace: testNamespace,
-		},
-	}
-
-	for _, c := range cases {
-		ps.ServiceByHostnameAndNamespace[c.hostname] = map[string]*Service{"default": nil}
-	}
-
-	for i, c := range cases {
-		service := &Service{
-			Hostname:   c.hostname,
-			Attributes: ServiceAttributes{Namespace: c.namespace},
-		}
-		testName := fmt.Sprintf("%d. %s.%s:%v", i, c.hostname, c.namespace, c.port)
-		t.Run(testName, func(t *testing.T) {
-			gotPolicy, gotMeta := ps.AuthenticationPolicyForWorkload(service, &c.port)
-			if gotMeta.Name != c.expectedPolicyName || gotMeta.Namespace != c.expectedPolicyNamespace {
-				t.Errorf("Config meta: got \"%s@%s\" != want(\"%s@%s\")\n",
-					gotMeta.Name, gotMeta.Namespace, c.expectedPolicyName, c.expectedPolicyNamespace)
-			}
-
-			if !reflect.DeepEqual(gotPolicy, c.expectedPolicy) {
-				t.Errorf("Policy: got(%v) != want(%v)\n", gotPolicy, c.expectedPolicy)
-			}
-		})
-	}
-}
-
-func TestJwtAuthNPolicy(t *testing.T) {
-	ms, err := test.StartNewServer()
-	defer func() { _ = ms.Stop() }()
-	if err != nil {
-		t.Fatal("failed to start a mock server")
-	}
-
-	ps := NewPushContext()
-	env := &Environment{Watcher: mesh.NewFixedWatcher(&meshconfig.MeshConfig{RootNamespace: "istio-system"})}
-	ps.Mesh = env.Mesh()
-	ps.ServiceDiscovery = env
-	authNPolicies := map[string]*authn.Policy{
-		constants.DefaultAuthenticationPolicyName: {},
-
-		"jwt-with-jwks-uri": {
-			Targets: []*authn.TargetSelector{{
-				Name: "jwt-svc-1",
-			}},
-			Origins: []*authn.OriginAuthenticationMethod{{
-				Jwt: &authn.Jwt{
-					Issuer:  "http://abc",
-					JwksUri: "http://xyz",
-				},
-			}},
-		},
-		"jwt-without-jwks-uri": {
-			Targets: []*authn.TargetSelector{{
-				Name: "jwt-svc-2",
-			}},
-			Origins: []*authn.OriginAuthenticationMethod{{
-				Jwt: &authn.Jwt{
-					Issuer: ms.URL,
-				},
-			}},
-		},
-	}
-
-	configStore := newFakeStore()
-	for key, value := range authNPolicies {
-		cfg := Config{
-			ConfigMeta: ConfigMeta{
-				Name:      key,
-				Domain:    "cluster.local",
-				Namespace: "default",
-			},
-			Spec: value,
-		}
-		if key == constants.DefaultAuthenticationPolicyName {
-			// Cluster-scoped policy
-			cfg.ConfigMeta.Type = collections.IstioAuthenticationV1Alpha1Meshpolicies.Resource().Kind()
-			cfg.ConfigMeta.Version = collections.IstioAuthenticationV1Alpha1Meshpolicies.Resource().Version()
-			cfg.ConfigMeta.Group = collections.IstioAuthenticationV1Alpha1Meshpolicies.Resource().Group()
-			cfg.ConfigMeta.Namespace = NamespaceAll
-		} else {
-			cfg.ConfigMeta.Type = collections.IstioAuthenticationV1Alpha1Policies.Resource().Kind()
-			cfg.ConfigMeta.Version = collections.IstioAuthenticationV1Alpha1Policies.Resource().Version()
-			cfg.ConfigMeta.Group = collections.IstioAuthenticationV1Alpha1Policies.Resource().Group()
-		}
-		if _, err := configStore.Create(cfg); err != nil {
-			t.Error(err)
-		}
-	}
-
-	store := istioConfigStore{ConfigStore: configStore}
-	env.IstioConfigStore = &store
-	if err := ps.initAuthnPolicies(env); err != nil {
-		t.Fatalf("init authn policies failed: %v", err)
-	}
-
-	cases := []struct {
-		hostname        host.Name
-		namespace       string
-		port            Port
-		expectedJwksURI string
-	}{
-		{
-			hostname:        "jwt-svc-1.default.svc.cluster.local",
-			namespace:       "default",
-			port:            Port{Port: 80},
-			expectedJwksURI: "http://xyz",
-		},
-		{
-			hostname:        "jwt-svc-2.default.svc.cluster.local",
-			namespace:       "default",
-			port:            Port{Port: 80},
-			expectedJwksURI: ms.URL + "/oauth2/v3/certs",
-		},
-	}
-
-	for _, c := range cases {
-		ps.ServiceByHostnameAndNamespace[c.hostname] = map[string]*Service{"default": nil}
-	}
-
-	for i, c := range cases {
-		service := &Service{
-			Hostname:   c.hostname,
-			Attributes: ServiceAttributes{Namespace: c.namespace},
-		}
-
-		// nolint: staticcheck
-		if got, _ := ps.AuthenticationPolicyForWorkload(service, &c.port); got.GetOrigins()[0].GetJwt().GetJwksUri() != c.expectedJwksURI {
-			t.Errorf("%d. AuthenticationPolicyForWorkload for %s.%s:%v: got(%v) != want(%v)\n", i, c.hostname, c.namespace, c.port, got, c.expectedJwksURI)
-		}
 	}
 }
 
@@ -595,7 +238,7 @@ func TestSidecarScope(t *testing.T) {
 	ps.ServiceByHostnameAndNamespace[host.Name("svc1.default.cluster.local")] = map[string]*Service{"default": nil}
 	ps.ServiceByHostnameAndNamespace[host.Name("svc2.nosidecar.cluster.local")] = map[string]*Service{"nosidecar": nil}
 
-	configStore := newFakeStore()
+	configStore := NewFakeStore()
 	sidecarWithWorkloadSelector := &networking.Sidecar{
 		WorkloadSelector: &networking.WorkloadSelector{
 			Labels: map[string]string{"app": "foo"},
@@ -617,21 +260,17 @@ func TestSidecarScope(t *testing.T) {
 	}
 	configWithWorkloadSelector := Config{
 		ConfigMeta: ConfigMeta{
-			Type:      collections.IstioNetworkingV1Alpha3Sidecars.Resource().Kind(),
-			Group:     collections.IstioNetworkingV1Alpha3Sidecars.Resource().Group(),
-			Version:   collections.IstioNetworkingV1Alpha3Sidecars.Resource().Version(),
-			Name:      "foo",
-			Namespace: "default",
+			GroupVersionKind: collections.IstioNetworkingV1Alpha3Sidecars.Resource().GroupVersionKind(),
+			Name:             "foo",
+			Namespace:        "default",
 		},
 		Spec: sidecarWithWorkloadSelector,
 	}
 	rootConfig := Config{
 		ConfigMeta: ConfigMeta{
-			Type:      collections.IstioNetworkingV1Alpha3Sidecars.Resource().Kind(),
-			Group:     collections.IstioNetworkingV1Alpha3Sidecars.Resource().Group(),
-			Version:   collections.IstioNetworkingV1Alpha3Sidecars.Resource().Version(),
-			Name:      "global",
-			Namespace: "istio-system",
+			GroupVersionKind: collections.IstioNetworkingV1Alpha3Sidecars.Resource().GroupVersionKind(),
+			Name:             "global",
+			Namespace:        "istio-system",
 		},
 		Spec: sidecarWithoutWorkloadSelector,
 	}
@@ -678,96 +317,24 @@ func TestSidecarScope(t *testing.T) {
 }
 
 func TestBestEffortInferServiceMTLSMode(t *testing.T) {
-	const alphaNamespace string = "alpha-namespace"
-	const betaNamespace string = "beta-namespace"
-	const otherNamespace string = "other-namespace"
+	const partialNS string = "partial"
+	const wholeNS string = "whole"
 	ps := NewPushContext()
 	env := &Environment{Watcher: mesh.NewFixedWatcher(&meshconfig.MeshConfig{RootNamespace: "istio-system"})}
 	ps.Mesh = env.Mesh()
 	ps.ServiceDiscovery = env
-	authNPolicies := map[string]*authn.Policy{
-		constants.DefaultAuthenticationPolicyName: {},
-		"mtls-strict-svc": {
-			Targets: []*authn.TargetSelector{{
-				Name: "mtls-strict-svc",
-			}},
-			Peers: []*authn.PeerAuthenticationMethod{{
-				Params: &authn.PeerAuthenticationMethod_Mtls{},
-			},
-			}},
-		"mtls-strict-svc-port": {
-			Targets: []*authn.TargetSelector{{
-				Name: "mtls-strict-svc-port",
-				Ports: []*authn.PortSelector{
-					{
-						Port: &authn.PortSelector_Number{
-							Number: 80,
-						},
-					},
-				},
-			}},
-			Peers: []*authn.PeerAuthenticationMethod{{
-				Params: &authn.PeerAuthenticationMethod_Mtls{},
-			},
-			}},
-		"mtls-disable-svc": {
-			Targets: []*authn.TargetSelector{{
-				Name: "mtls-disable-svc",
-			}},
-		},
-	}
-	configStore := newFakeStore()
-	for key, value := range authNPolicies {
-		cfg := Config{
-			ConfigMeta: ConfigMeta{
-				Type:      collections.IstioAuthenticationV1Alpha1Policies.Resource().Kind(),
-				Group:     collections.IstioAuthenticationV1Alpha1Policies.Resource().Group(),
-				Version:   collections.IstioAuthenticationV1Alpha1Policies.Resource().Version(),
-				Name:      key,
-				Domain:    "cluster.local",
-				Namespace: alphaNamespace,
-			},
-			Spec: value,
-		}
-		if _, err := configStore.Create(cfg); err != nil {
-			t.Error(err)
-		}
-	}
 
-	// Add cluster-scoped policy
-	globalPolicy := &authn.Policy{
-		Peers: []*authn.PeerAuthenticationMethod{{
-			Params: &authn.PeerAuthenticationMethod_Mtls{
-				Mtls: &authn.MutualTls{
-					Mode: authn.MutualTls_PERMISSIVE,
-				},
-			},
-		}},
-	}
-	globalCfg := Config{
-		ConfigMeta: ConfigMeta{
-			Type:    collections.IstioAuthenticationV1Alpha1Meshpolicies.Resource().Kind(),
-			Group:   collections.IstioAuthenticationV1Alpha1Meshpolicies.Resource().Group(),
-			Version: collections.IstioAuthenticationV1Alpha1Meshpolicies.Resource().Version(),
-			Name:    constants.DefaultAuthenticationPolicyName,
-			Domain:  "cluster.local",
-		},
-		Spec: globalPolicy,
-	}
+	configStore := NewFakeStore()
 
 	// Add beta policies
-	configStore.Create(*createTestPeerAuthenticationResource("default", betaNamespace, time.Now(), nil, securityBeta.PeerAuthentication_MutualTLS_STRICT))
+	configStore.Create(*createTestPeerAuthenticationResource("default", wholeNS, time.Now(), nil, securityBeta.PeerAuthentication_MutualTLS_STRICT))
 	// workload level beta policy.
-	configStore.Create(*createTestPeerAuthenticationResource("workload-beta-policy", alphaNamespace, time.Now(), &selectorpb.WorkloadSelector{
+	configStore.Create(*createTestPeerAuthenticationResource("workload-beta-policy", partialNS, time.Now(), &selectorpb.WorkloadSelector{
 		MatchLabels: map[string]string{
 			"app":     "httpbin",
 			"version": "v1",
 		},
-	}, securityBeta.PeerAuthentication_MutualTLS_STRICT))
-
-	if _, err := configStore.Create(globalCfg); err != nil {
-		t.Error(err)
-	}
+	}, securityBeta.PeerAuthentication_MutualTLS_DISABLE))
 
 	store := istioConfigStore{ConfigStore: configStore}
 	env.IstioConfigStore = &store
@@ -777,64 +344,34 @@ func TestBestEffortInferServiceMTLSMode(t *testing.T) {
 
 	cases := []struct {
 		name             string
-		serviceName      host.Name
 		serviceNamespace string
 		servicePort      int
 		wanted           MutualTLSMode
 	}{
 		{
-			name:             "from beta policy",
-			serviceName:      "some-service",
-			serviceNamespace: betaNamespace,
+			name:             "from namespace policy",
+			serviceNamespace: wholeNS,
 			servicePort:      80,
 			wanted:           MTLSStrict,
 		},
 		{
-			name:             "from alpha global policy",
-			serviceName:      "some-service",
-			serviceNamespace: otherNamespace,
+			name:             "from mesh default",
+			serviceNamespace: partialNS,
 			servicePort:      80,
 			wanted:           MTLSPermissive,
 		},
-		{
-			name:             "from alpha namespace policy",
-			serviceName:      "some-service",
-			serviceNamespace: alphaNamespace,
-			servicePort:      80,
-			wanted:           MTLSDisable,
-		},
-		{
-			name:             "from service specific alpha policy",
-			serviceName:      "mtls-strict-svc",
-			serviceNamespace: alphaNamespace,
-			servicePort:      80,
-			wanted:           MTLSStrict,
-		},
-		{
-			name:             "from service-port specific alpha policy",
-			serviceName:      "mtls-strict-svc-port",
-			serviceNamespace: alphaNamespace,
-			servicePort:      80,
-			wanted:           MTLSStrict,
-		},
-		{
-			name:             "from namespace alpha policy - miss port",
-			serviceName:      "mtls-strict-svc-port",
-			serviceNamespace: alphaNamespace,
-			servicePort:      90,
-			wanted:           MTLSDisable,
-		},
 	}
+	serviceName := host.Name("some-service")
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			service := &Service{
-				Hostname:   host.Name(fmt.Sprintf("%s.%s.svc.cluster.local", tc.serviceName, tc.serviceNamespace)),
+				Hostname:   host.Name(fmt.Sprintf("%s.%s.svc.cluster.local", serviceName, tc.serviceNamespace)),
 				Attributes: ServiceAttributes{Namespace: tc.serviceNamespace},
 			}
 			// Intentionally use the externalService with the same name and namespace for test, though
 			// these attributes don't matter.
 			externalService := &Service{
-				Hostname:     host.Name(fmt.Sprintf("%s.%s.svc.cluster.local", tc.serviceName, tc.serviceNamespace)),
+				Hostname:     host.Name(fmt.Sprintf("%s.%s.svc.cluster.local", serviceName, tc.serviceNamespace)),
 				Attributes:   ServiceAttributes{Namespace: tc.serviceNamespace},
 				MeshExternal: true,
 			}
@@ -859,65 +396,574 @@ func scopeToSidecar(scope *SidecarScope) string {
 	return scope.Config.Namespace + "/" + scope.Config.Name
 }
 
-type fakeStore struct {
-	store map[resource.GroupVersionKind]map[string][]Config
-}
-
-func newFakeStore() *fakeStore {
-	f := fakeStore{
-		store: make(map[resource.GroupVersionKind]map[string][]Config),
+func TestSetDestinationRuleMerging(t *testing.T) {
+	ps := NewPushContext()
+	ps.defaultDestinationRuleExportTo = map[visibility.Instance]bool{visibility.Public: true}
+	testhost := "httpbin.org"
+	destinationRuleNamespace1 := Config{
+		ConfigMeta: ConfigMeta{
+			Name:      "rule1",
+			Namespace: "test",
+		},
+		Spec: &networking.DestinationRule{
+			Host: testhost,
+			Subsets: []*networking.Subset{
+				{
+					Name: "subset1",
+				},
+				{
+					Name: "subset2",
+				},
+			},
+		},
 	}
-	return &f
-}
-
-var _ ConfigStore = (*fakeStore)(nil)
-
-func (*fakeStore) Schemas() collection.Schemas {
-	return collections.Pilot
-}
-
-func (*fakeStore) Get(typ resource.GroupVersionKind, name, namespace string) *Config { return nil }
-
-func (s *fakeStore) List(typ resource.GroupVersionKind, namespace string) ([]Config, error) {
-	nsConfigs := s.store[typ]
-	if nsConfigs == nil {
-		return nil, nil
+	destinationRuleNamespace2 := Config{
+		ConfigMeta: ConfigMeta{
+			Name:      "rule2",
+			Namespace: "test",
+		},
+		Spec: &networking.DestinationRule{
+			Host: testhost,
+			Subsets: []*networking.Subset{
+				{
+					Name: "subset3",
+				},
+				{
+					Name: "subset4",
+				},
+			},
+		},
 	}
-	var res []Config
-	if namespace == NamespaceAll {
-		for _, configs := range nsConfigs {
-			res = append(res, configs...)
+	ps.SetDestinationRules([]Config{destinationRuleNamespace1, destinationRuleNamespace2})
+	subsetsLocal := ps.namespaceLocalDestRules["test"].destRule[host.Name(testhost)].Spec.(*networking.DestinationRule).Subsets
+	subsetsExport := ps.exportedDestRulesByNamespace["test"].destRule[host.Name(testhost)].Spec.(*networking.DestinationRule).Subsets
+	if len(subsetsLocal) != 4 {
+		t.Errorf("want %d, but got %d", 4, len(subsetsLocal))
+	}
+
+	if len(subsetsExport) != 4 {
+		t.Errorf("want %d, but got %d", 4, len(subsetsExport))
+	}
+}
+
+func TestSetDestinationRuleWithExportTo(t *testing.T) {
+	ps := NewPushContext()
+	ps.Mesh = &meshconfig.MeshConfig{RootNamespace: "istio-system"}
+	testhost := "httpbin.org"
+	destinationRuleNamespace1 := Config{
+		ConfigMeta: ConfigMeta{
+			Name:      "rule1",
+			Namespace: "test1",
+		},
+		Spec: &networking.DestinationRule{
+			Host:     testhost,
+			ExportTo: []string{".", "ns1"},
+			Subsets: []*networking.Subset{
+				{
+					Name: "subset1",
+				},
+				{
+					Name: "subset2",
+				},
+			},
+		},
+	}
+	destinationRuleNamespace2 := Config{
+		ConfigMeta: ConfigMeta{
+			Name:      "rule2",
+			Namespace: "test2",
+		},
+		Spec: &networking.DestinationRule{
+			Host:     testhost,
+			ExportTo: []string{"test2", "ns1", "test1"},
+			Subsets: []*networking.Subset{
+				{
+					Name: "subset3",
+				},
+				{
+					Name: "subset4",
+				},
+			},
+		},
+	}
+	destinationRuleNamespace3 := Config{
+		ConfigMeta: ConfigMeta{
+			Name:      "rule3",
+			Namespace: "test3",
+		},
+		Spec: &networking.DestinationRule{
+			Host:     testhost,
+			ExportTo: []string{"test1", "test2", "*"},
+			Subsets: []*networking.Subset{
+				{
+					Name: "subset5",
+				},
+				{
+					Name: "subset6",
+				},
+			},
+		},
+	}
+	destinationRuleRootNamespace := Config{
+		ConfigMeta: ConfigMeta{
+			Name:      "rule4",
+			Namespace: "istio-system",
+		},
+		Spec: &networking.DestinationRule{
+			Host: testhost,
+			Subsets: []*networking.Subset{
+				{
+					Name: "subset7",
+				},
+				{
+					Name: "subset8",
+				},
+			},
+		},
+	}
+	ps.SetDestinationRules([]Config{destinationRuleNamespace1, destinationRuleNamespace2,
+		destinationRuleNamespace3, destinationRuleRootNamespace})
+	cases := []struct {
+		proxyNs     string
+		serviceNs   string
+		wantSubsets []string
+	}{
+		{
+			proxyNs:     "test1",
+			serviceNs:   "test1",
+			wantSubsets: []string{"subset1", "subset2"},
+		},
+		{
+			proxyNs:     "test1",
+			serviceNs:   "test2",
+			wantSubsets: []string{"subset1", "subset2"},
+		},
+		{
+			proxyNs:     "test2",
+			serviceNs:   "test1",
+			wantSubsets: []string{"subset3", "subset4"},
+		},
+		{
+			proxyNs:     "test3",
+			serviceNs:   "test1",
+			wantSubsets: []string{"subset5", "subset6"},
+		},
+		{
+			proxyNs:     "ns1",
+			serviceNs:   "test1",
+			wantSubsets: []string{"subset1", "subset2"},
+		},
+		{
+			proxyNs:     "ns1",
+			serviceNs:   "random",
+			wantSubsets: []string{"subset7", "subset8"},
+		},
+		{
+			proxyNs:     "random",
+			serviceNs:   "random",
+			wantSubsets: []string{"subset7", "subset8"},
+		},
+		{
+			proxyNs:     "test3",
+			serviceNs:   "random",
+			wantSubsets: []string{"subset5", "subset6"},
+		},
+	}
+	for _, tt := range cases {
+		destRuleConfig := ps.DestinationRule(&Proxy{ConfigNamespace: tt.proxyNs},
+			&Service{Hostname: host.Name(testhost), Attributes: ServiceAttributes{Namespace: tt.serviceNs}})
+		if destRuleConfig == nil {
+			t.Fatalf("proxy in %s namespace: dest rule is nil, expected subsets %+v", tt.proxyNs, tt.wantSubsets)
 		}
-		return res, nil
+		destRule := destRuleConfig.Spec.(*networking.DestinationRule)
+		var gotSubsets []string
+		for _, ss := range destRule.Subsets {
+			gotSubsets = append(gotSubsets, ss.Name)
+		}
+		if !reflect.DeepEqual(gotSubsets, tt.wantSubsets) {
+			t.Fatalf("proxy in %s namespace: want %+v, got %+v", tt.proxyNs, tt.wantSubsets, gotSubsets)
+		}
 	}
-	return nsConfigs[namespace], nil
 }
 
-func (s *fakeStore) Create(config Config) (revision string, err error) {
-	configs := s.store[config.GroupVersionKind()]
-	if configs == nil {
-		configs = make(map[string][]Config)
+func TestVirtualServiceWithExportTo(t *testing.T) {
+	ps := NewPushContext()
+	env := &Environment{Watcher: mesh.NewFixedWatcher(&meshconfig.MeshConfig{RootNamespace: "zzz"})}
+	ps.Mesh = env.Mesh()
+	ps.ServiceDiscovery = env
+	configStore := NewFakeStore()
+	gatewayName := "default/gateway"
+
+	rule1 := Config{
+		ConfigMeta: ConfigMeta{
+			Name:             "rule1",
+			Namespace:        "test1",
+			GroupVersionKind: gvk.VirtualService,
+		},
+		Spec: &networking.VirtualService{
+			Hosts:    []string{"rule1.com"},
+			ExportTo: []string{".", "ns1"},
+		},
 	}
-	configs[config.Namespace] = append(configs[config.Namespace], config)
-	s.store[config.GroupVersionKind()] = configs
-	return "", nil
+	rule2 := Config{
+		ConfigMeta: ConfigMeta{
+			Name:             "rule2",
+			Namespace:        "test2",
+			GroupVersionKind: gvk.VirtualService,
+		},
+		Spec: &networking.VirtualService{
+			Hosts:    []string{"rule2.com"},
+			ExportTo: []string{"test2", "ns1", "test1"},
+		},
+	}
+	rule2Gw := Config{
+		ConfigMeta: ConfigMeta{
+			Name:             "rule2Gw",
+			Namespace:        "test2",
+			GroupVersionKind: gvk.VirtualService,
+		},
+		Spec: &networking.VirtualService{
+			Gateways: []string{gatewayName, constants.IstioMeshGateway},
+			Hosts:    []string{"rule2gw.com"},
+			ExportTo: []string{"test2", "ns1", "test1"},
+		},
+	}
+	rule3 := Config{
+		ConfigMeta: ConfigMeta{
+			Name:             "rule3",
+			Namespace:        "test3",
+			GroupVersionKind: gvk.VirtualService,
+		},
+		Spec: &networking.VirtualService{
+			Gateways: []string{constants.IstioMeshGateway},
+			Hosts:    []string{"rule3.com"},
+			ExportTo: []string{"test1", "test2", "*"},
+		},
+	}
+	rule3Gw := Config{
+		ConfigMeta: ConfigMeta{
+			Name:             "rule3Gw",
+			Namespace:        "test3",
+			GroupVersionKind: gvk.VirtualService,
+		},
+		Spec: &networking.VirtualService{
+			Gateways: []string{gatewayName},
+			Hosts:    []string{"rule3gw.com"},
+			ExportTo: []string{"test1", "test2", "*"},
+		},
+	}
+	rootNS := Config{
+		ConfigMeta: ConfigMeta{
+			Name:             "zzz",
+			Namespace:        "zzz",
+			GroupVersionKind: gvk.VirtualService,
+		},
+		Spec: &networking.VirtualService{
+			Hosts: []string{"rootNS.com"},
+		},
+	}
+
+	for _, c := range []Config{rule1, rule2, rule3, rule2Gw, rule3Gw, rootNS} {
+		if _, err := configStore.Create(c); err != nil {
+			t.Fatalf("could not create %v", c.Name)
+		}
+	}
+
+	store := istioConfigStore{ConfigStore: configStore}
+	env.IstioConfigStore = &store
+	ps.initDefaultExportMaps()
+	if err := ps.initVirtualServices(env); err != nil {
+		t.Fatalf("init virtual services failed: %v", err)
+	}
+
+	cases := []struct {
+		proxyNs   string
+		gateway   string
+		wantHosts []string
+	}{
+		{
+			proxyNs:   "test1",
+			wantHosts: []string{"rule1.com", "rule2.com", "rule2gw.com", "rule3.com", "rootNS.com"},
+			gateway:   constants.IstioMeshGateway,
+		},
+		{
+			proxyNs:   "test2",
+			wantHosts: []string{"rule2.com", "rule2gw.com", "rule3.com", "rootNS.com"},
+			gateway:   constants.IstioMeshGateway,
+		},
+		{
+			proxyNs:   "ns1",
+			wantHosts: []string{"rule1.com", "rule2.com", "rule2gw.com", "rule3.com", "rootNS.com"},
+			gateway:   constants.IstioMeshGateway,
+		},
+		{
+			proxyNs:   "random",
+			wantHosts: []string{"rule3.com", "rootNS.com"},
+			gateway:   constants.IstioMeshGateway,
+		},
+		{
+			proxyNs:   "test1",
+			wantHosts: []string{"rule2gw.com", "rule3gw.com"},
+			gateway:   gatewayName,
+		},
+		{
+			proxyNs:   "test2",
+			wantHosts: []string{"rule2gw.com", "rule3gw.com"},
+			gateway:   gatewayName,
+		},
+		{
+			proxyNs:   "ns1",
+			wantHosts: []string{"rule2gw.com", "rule3gw.com"},
+			gateway:   gatewayName,
+		},
+		{
+			proxyNs:   "random",
+			wantHosts: []string{"rule3gw.com"},
+			gateway:   gatewayName,
+		},
+	}
+	for _, tt := range cases {
+		t.Run(fmt.Sprintf("%s-%s", tt.proxyNs, tt.gateway), func(t *testing.T) {
+			rules := ps.VirtualServicesForGateway(&Proxy{ConfigNamespace: tt.proxyNs}, tt.gateway)
+			gotHosts := make([]string, 0)
+			for _, r := range rules {
+				vs := r.Spec.(*networking.VirtualService)
+				gotHosts = append(gotHosts, vs.Hosts...)
+			}
+			if !reflect.DeepEqual(gotHosts, tt.wantHosts) {
+				t.Errorf("want %+v, got %+v", tt.wantHosts, gotHosts)
+			}
+		})
+	}
 }
 
-func (*fakeStore) Update(config Config) (newRevision string, err error) { return "", nil }
+func TestServiceWithExportTo(t *testing.T) {
+	ps := NewPushContext()
+	env := &Environment{Watcher: mesh.NewFixedWatcher(&meshconfig.MeshConfig{RootNamespace: "zzz"})}
+	ps.Mesh = env.Mesh()
+	ps.ServiceDiscovery = env
 
-func (*fakeStore) Delete(typ resource.GroupVersionKind, name, namespace string) error { return nil }
+	svc1 := &Service{
+		Hostname: "svc1",
+		Attributes: ServiceAttributes{
+			Namespace: "test1",
+			ExportTo:  map[visibility.Instance]bool{visibility.Private: true, visibility.Instance("ns1"): true},
+		},
+	}
+	svc2 := &Service{
+		Hostname: "svc2",
+		Attributes: ServiceAttributes{
+			Namespace: "test2",
+			ExportTo: map[visibility.Instance]bool{visibility.Instance("test1"): true,
+				visibility.Instance("ns1"):   true,
+				visibility.Instance("test2"): true},
+		},
+	}
+	svc3 := &Service{
+		Hostname: "svc3",
+		Attributes: ServiceAttributes{
+			Namespace: "test3",
+			ExportTo: map[visibility.Instance]bool{visibility.Instance("test1"): true,
+				visibility.Public:            true,
+				visibility.Instance("test2"): true},
+		},
+	}
+	svc4 := &Service{
+		Hostname: "svc4",
+		Attributes: ServiceAttributes{
+			Namespace: "test4",
+		},
+	}
+	env.ServiceDiscovery = &localServiceDiscovery{
+		services: []*Service{svc1, svc2, svc3, svc4},
+	}
+	ps.initDefaultExportMaps()
+	if err := ps.initServiceRegistry(env); err != nil {
+		t.Fatalf("init services failed: %v", err)
+	}
 
-func (*fakeStore) Version() string {
-	return "not implemented"
+	cases := []struct {
+		proxyNs   string
+		wantHosts []string
+	}{
+		{
+			proxyNs:   "test1",
+			wantHosts: []string{"svc1", "svc2", "svc3", "svc4"},
+		},
+		{
+			proxyNs:   "test2",
+			wantHosts: []string{"svc2", "svc3", "svc4"},
+		},
+		{
+			proxyNs:   "ns1",
+			wantHosts: []string{"svc1", "svc2", "svc3", "svc4"},
+		},
+		{
+			proxyNs:   "random",
+			wantHosts: []string{"svc3", "svc4"},
+		},
+	}
+	for _, tt := range cases {
+		services := ps.Services(&Proxy{ConfigNamespace: tt.proxyNs})
+		gotHosts := make([]string, 0)
+		for _, r := range services {
+			gotHosts = append(gotHosts, string(r.Hostname))
+		}
+		if !reflect.DeepEqual(gotHosts, tt.wantHosts) {
+			t.Errorf("proxy in %s namespace: want %+v, got %+v", tt.proxyNs, tt.wantHosts, gotHosts)
+		}
+	}
 }
-func (*fakeStore) GetResourceAtVersion(version string, key string) (resourceVersion string, err error) {
-	return "not implemented", nil
+
+func TestIsClusterLocal(t *testing.T) {
+	cases := []struct {
+		name     string
+		m        meshconfig.MeshConfig
+		host     string
+		expected bool
+	}{
+		{
+			name:     "local by default",
+			m:        mesh.DefaultMeshConfig(),
+			host:     "s.kube-system.svc.cluster.local",
+			expected: true,
+		},
+		{
+			name:     "discovery server is local",
+			m:        mesh.DefaultMeshConfig(),
+			host:     "istiod.istio-system.svc.cluster.local",
+			expected: true,
+		},
+		{
+			name:     "not local by default",
+			m:        mesh.DefaultMeshConfig(),
+			host:     "not.cluster.local",
+			expected: false,
+		},
+		{
+			name: "override default",
+			m: meshconfig.MeshConfig{
+				// Remove the cluster-local setting for kube-system.
+				ServiceSettings: []*meshconfig.MeshConfig_ServiceSettings{
+					{
+						Settings: &meshconfig.MeshConfig_ServiceSettings_Settings{
+							ClusterLocal: false,
+						},
+						Hosts: []string{"*.kube-system.svc.cluster.local"},
+					},
+				},
+			},
+			host:     "s.kube-system.svc.cluster.local",
+			expected: false,
+		},
+		{
+			name: "local 1",
+			m: meshconfig.MeshConfig{
+				ServiceSettings: []*meshconfig.MeshConfig_ServiceSettings{
+					{
+						Settings: &meshconfig.MeshConfig_ServiceSettings_Settings{
+							ClusterLocal: true,
+						},
+						Hosts: []string{
+							"*.ns1.svc.cluster.local",
+							"*.ns2.svc.cluster.local",
+						},
+					},
+				},
+			},
+			host:     "s.ns1.svc.cluster.local",
+			expected: true,
+		},
+		{
+			name: "local 2",
+			m: meshconfig.MeshConfig{
+				ServiceSettings: []*meshconfig.MeshConfig_ServiceSettings{
+					{
+						Settings: &meshconfig.MeshConfig_ServiceSettings_Settings{
+							ClusterLocal: true,
+						},
+						Hosts: []string{
+							"*.ns1.svc.cluster.local",
+							"*.ns2.svc.cluster.local",
+						},
+					},
+				},
+			},
+			host:     "s.ns2.svc.cluster.local",
+			expected: true,
+		},
+		{
+			name: "not local",
+			m: meshconfig.MeshConfig{
+				ServiceSettings: []*meshconfig.MeshConfig_ServiceSettings{
+					{
+						Settings: &meshconfig.MeshConfig_ServiceSettings_Settings{
+							ClusterLocal: true,
+						},
+						Hosts: []string{
+							"*.ns1.svc.cluster.local",
+							"*.ns2.svc.cluster.local",
+						},
+					},
+				},
+			},
+			host:     "s.ns3.svc.cluster.local",
+			expected: false,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			env := &Environment{Watcher: mesh.NewFixedWatcher(&c.m)}
+			push := &PushContext{
+				Mesh: env.Mesh(),
+			}
+			push.initClusterLocalHosts(env)
+
+			svc := &Service{
+				Hostname: host.Name(c.host),
+			}
+			clusterLocal := push.IsClusterLocal(svc)
+			g.Expect(clusterLocal).To(Equal(c.expected))
+		})
+	}
 }
 
-func (s *fakeStore) GetLedger() ledger.Ledger {
+// MockDiscovery is an in-memory ServiceDiscover with mock services
+type localServiceDiscovery struct {
+	services []*Service
+}
+
+func (l *localServiceDiscovery) Services() ([]*Service, error) {
+	return l.services, nil
+}
+
+func (l *localServiceDiscovery) GetService(hostname host.Name) (*Service, error) {
 	panic("implement me")
 }
 
-func (s *fakeStore) SetLedger(ledger.Ledger) error {
+func (l *localServiceDiscovery) InstancesByPort(svc *Service, servicePort int, labels labels.Collection) ([]*ServiceInstance, error) {
+	panic("implement me")
+}
+
+func (l *localServiceDiscovery) GetProxyServiceInstances(proxy *Proxy) ([]*ServiceInstance, error) {
+	panic("implement me")
+}
+
+func (l *localServiceDiscovery) GetProxyWorkloadLabels(proxy *Proxy) (labels.Collection, error) {
+	panic("implement me")
+}
+
+func (l *localServiceDiscovery) ManagementPorts(addr string) PortList {
+	panic("implement me")
+}
+
+func (l *localServiceDiscovery) WorkloadHealthCheckInfo(addr string) ProbeList {
+	panic("implement me")
+}
+
+func (l *localServiceDiscovery) GetIstioServiceAccounts(svc *Service, ports []int) []string {
 	panic("implement me")
 }

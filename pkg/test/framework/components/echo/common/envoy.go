@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package common
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	envoyAdmin "github.com/envoyproxy/go-control-plane/envoy/admin/v3"
@@ -50,6 +51,11 @@ func WaitForConfig(fetch ConfigFetchFunc, accept ConfigAcceptFunc, options ...re
 	_, err := retry.Do(func() (result interface{}, completed bool, err error) {
 		cfg, err = fetch()
 		if err != nil {
+			if strings.Contains(err.Error(), "could not resolve Any message type") {
+				// Unable to parse an Any in the message, likely due to missing imports.
+				// This is not a recoverable error.
+				return nil, true, err
+			}
 			return nil, false, err
 		}
 
@@ -86,14 +92,14 @@ func WaitForConfig(fetch ConfigFetchFunc, accept ConfigAcceptFunc, options ...re
 
 // OutboundConfigAcceptFunc returns a function that accepts Envoy configuration if it contains
 // outbound configuration for all of the given instances.
-func OutboundConfigAcceptFunc(outboundInstances ...echo.Instance) ConfigAcceptFunc {
+func OutboundConfigAcceptFunc(source echo.Instance, targets ...echo.Instance) ConfigAcceptFunc {
 	return func(cfg *envoyAdmin.ConfigDump) (bool, error) {
 		validator := structpath.ForProto(cfg)
 
-		for _, target := range outboundInstances {
+		for _, target := range targets {
 			for _, port := range target.Config().Ports {
 				// Ensure that we have an outbound configuration for the target port.
-				if err := CheckOutboundConfig(target, port, validator); err != nil {
+				if err := CheckOutboundConfig(source, target, port, validator); err != nil {
 					return false, err
 				}
 			}
@@ -104,7 +110,7 @@ func OutboundConfigAcceptFunc(outboundInstances ...echo.Instance) ConfigAcceptFu
 }
 
 // CheckOutboundConfig checks the Envoy config dump for outbound configuration to the given target.
-func CheckOutboundConfig(target echo.Instance, port echo.Port, validator *structpath.Instance) error {
+func CheckOutboundConfig(source echo.Instance, target echo.Instance, port echo.Port, validator *structpath.Instance) error {
 	// Verify that we have an outbound cluster for the target.
 	clusterName := clusterName(target, port)
 	if err := validator.
@@ -126,7 +132,7 @@ func CheckOutboundConfig(target echo.Instance, port echo.Port, validator *struct
 			Check()
 	}
 
-	if !target.Config().Headless {
+	if !target.Config().Headless && source.Config().Cluster.Name() == target.Config().Cluster.Name() {
 		// TCP case: Make sure we have an outbound listener configured.
 		listenerName := listenerName(target.Address(), port)
 		return validator.

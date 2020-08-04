@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,19 +26,24 @@ func OperatorCmd() *cobra.Command {
 		Long:  "The operator subcommand installs, removes and shows the status of the operator controller.",
 	}
 
+	odArgs := &operatorDumpArgs{}
 	oiArgs := &operatorInitArgs{}
 	orArgs := &operatorRemoveArgs{}
 	args := &rootArgs{}
 
+	odc := operatorDumpCmd(args, odArgs)
 	oic := operatorInitCmd(args, oiArgs)
 	orc := operatorRemoveCmd(args, orArgs)
 
+	addFlags(odc, args)
 	addFlags(oic, args)
 	addFlags(orc, args)
 
+	addOperatorDumpFlags(odc, odArgs)
 	addOperatorInitFlags(oic, oiArgs)
 	addOperatorRemoveFlags(orc, orArgs)
 
+	oc.AddCommand(odc)
 	oc.AddCommand(oic)
 	oc.AddCommand(orc)
 

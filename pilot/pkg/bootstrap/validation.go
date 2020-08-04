@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,15 +15,12 @@
 package bootstrap
 
 import (
-	"path/filepath"
 	"strings"
 
 	"istio.io/pkg/env"
 	"istio.io/pkg/log"
 
-	"istio.io/istio/galley/pkg/config/source/kube"
-	"istio.io/istio/mixer/pkg/validate"
-	"istio.io/istio/pilot/pkg/features"
+	"istio.io/istio/pilot/pkg/leaderelection"
 	"istio.io/istio/pkg/config/schema/collections"
 	"istio.io/istio/pkg/webhooks/validation/controller"
 	"istio.io/istio/pkg/webhooks/validation/server"
@@ -40,18 +37,16 @@ var (
 )
 
 func (s *Server) initConfigValidation(args *PilotArgs) error {
-	if features.IstiodService.Get() == "" {
+	if s.kubeClient == nil {
 		return nil
 	}
 
+	log.Info("initializing config validator")
 	// always start the validation server
 	params := server.Options{
-		MixerValidator: validate.NewDefaultValidator(false),
-		Schemas:        collections.Istio,
-		DomainSuffix:   args.Config.ControllerOptions.DomainSuffix,
-		CertFile:       filepath.Join(dnsCertDir, "cert-chain.pem"),
-		KeyFile:        filepath.Join(dnsCertDir, "key.pem"),
-		Mux:            s.httpsMux,
+		Schemas:      collections.Istio,
+		DomainSuffix: args.RegistryOptions.KubeOptions.DomainSuffix,
+		Mux:          s.httpsMux,
 	}
 	whServer, err := server.New(params)
 	if err != nil {
@@ -63,38 +58,34 @@ func (s *Server) initConfigValidation(args *PilotArgs) error {
 		return nil
 	})
 
-	if webhookConfigName := validationWebhookConfigName.Get(); webhookConfigName != "" {
-		iface, err := kube.NewInterfacesFromConfigFile(args.Config.KubeConfig)
-		if err != nil {
-			return err
-		}
-		client, err := iface.KubeClient()
-		if err != nil {
-			return err
-		}
-		dynamicInterface, err := iface.DynamicInterface()
-		if err != nil {
-			return err
-		}
-
+	if webhookConfigName := validationWebhookConfigName.Get(); webhookConfigName != "" && s.kubeClient != nil {
 		if webhookConfigName == validationWebhookConfigNameTemplate {
 			webhookConfigName = strings.ReplaceAll(validationWebhookConfigNameTemplate, validationWebhookConfigNameTemplateVar, args.Namespace)
 		}
 
+		caBundlePath := s.caBundlePath
+		if hasCustomTLSCerts(args.ServerOptions.TLSOptions) {
+			caBundlePath = args.ServerOptions.TLSOptions.CaCertFile
+		}
 		o := controller.Options{
 			WatchedNamespace:  args.Namespace,
-			CAPath:            s.caBundlePath,
+			CAPath:            caBundlePath,
 			WebhookConfigName: webhookConfigName,
 			ServiceName:       "istiod",
 		}
-		whController, err := controller.New(o, client, dynamicInterface)
+		whController, err := controller.New(o, s.kubeClient)
 		if err != nil {
+			log.Errorf("failed to start validation controller: %v", err)
 			return err
 		}
-
-		s.leaderElection.AddRunFunction(func(stop <-chan struct{}) {
-			log.Infof("Starting validation controller")
-			whController.Start(stop)
+		s.addTerminatingStartFunc(func(stop <-chan struct{}) error {
+			le := leaderelection.NewLeaderElection(args.Namespace, args.PodName, leaderelection.ValidationController, s.kubeClient)
+			le.AddRunFunction(func(leaderStop <-chan struct{}) {
+				log.Infof("Starting validation controller")
+				whController.Start(leaderStop)
+			})
+			le.Run(stop)
+			return nil
 		})
 	}
 	return nil

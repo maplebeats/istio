@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,7 +22,6 @@ import (
 	"istio.io/istio/pkg/test/framework/label"
 
 	"istio.io/istio/pkg/test/framework"
-	"istio.io/istio/pkg/test/framework/components/environment"
 	"istio.io/istio/pkg/test/framework/components/istio"
 	"istio.io/istio/pkg/test/framework/components/istioctl"
 )
@@ -31,14 +30,13 @@ var (
 	inst istio.Instance
 )
 
-// This test requires `--istio.test.env=kube` because it tests istioctl managing k8s webhook configurations.
 func TestMain(m *testing.M) {
 	framework.
-		NewSuite("istioctl_webhook_test", m).
+		NewSuite(m).
 		Label(label.CustomSetup).
-		RequireEnvironment(environment.Kube).
+		RequireSingleCluster().
 		// Deploy Istio
-		SetupOnEnv(environment.Kube, istio.Setup(&inst, setupConfig)).
+		Setup(istio.Setup(&inst, setupConfig)).
 		Run()
 }
 
@@ -46,15 +44,25 @@ func setupConfig(cfg *istio.Config) {
 	if cfg == nil {
 		return
 	}
-	// Helm values from install/kubernetes/helm/istio/test-values/values-istio-dns-cert.yaml
-	cfg.ValuesFile = "test-values/values-istio-dns-cert.yaml"
-	cfg.Values["global.operatorManageWebhooks"] = "true"
+	cfg.ControlPlaneValues = `
+values:
+  meshConfig:
+    certificates:
+      - dnsNames: [istio-pilot.istio-system.svc, istio-pilot.istio-system]
+      - secretName: dns.istio-galley-service-account
+        dnsNames: [istio-galley.istio-system.svc, istio-galley.istio-system]
+      - secretName: dns.istio-sidecar-injector-service-account
+        dnsNames: [istio-sidecar-injector.istio-system.svc, istio-sidecar-injector.istio-system]
+  global:
+    operatorManageWebhooks: true
+`
 }
 
 // TestWebhookManagement tests "istioctl experimental post-install webhook" command.
 func TestWebhookManagement(t *testing.T) {
 	framework.
 		NewTest(t).
+		Features("security.control-plane.k8s-certs").
 		Run(func(ctx framework.TestContext) {
 			ctx.Skip("TODO(github.com/istio/istio/issues/20289)")
 
@@ -62,8 +70,8 @@ func TestWebhookManagement(t *testing.T) {
 			args := []string{"experimental", "post-install", "webhook", "enable", "--validation", "--webhook-secret",
 				"dns.istio-galley-service-account", "--namespace", "istio-system", "--validation-path", "./config/galley-webhook.yaml",
 				"--injection-path", "./config/sidecar-injector-webhook.yaml"}
-			istioCtl := istioctl.NewOrFail(t, ctx, istioctl.Config{})
-			output, fErr := istioCtl.Invoke(args)
+			istioCtl := istioctl.NewOrFail(ctx, ctx, istioctl.Config{})
+			output, _, fErr := istioCtl.Invoke(args)
 			if fErr != nil {
 				t.Fatalf("error returned for 'istioctl %s': %v", strings.Join(args, " "), fErr)
 			}
@@ -84,8 +92,8 @@ func TestWebhookManagement(t *testing.T) {
 
 			// Test that webhook statuses returned by running istioctl are as expected.
 			args = []string{"experimental", "post-install", "webhook", "status"}
-			istioCtl = istioctl.NewOrFail(t, ctx, istioctl.Config{})
-			output, fErr = istioCtl.Invoke(args)
+			istioCtl = istioctl.NewOrFail(ctx, ctx, istioctl.Config{})
+			output, _, fErr = istioCtl.Invoke(args)
 			if fErr != nil {
 				t.Fatalf("error returned for 'istioctl %s': %v", strings.Join(args, " "), fErr)
 			}

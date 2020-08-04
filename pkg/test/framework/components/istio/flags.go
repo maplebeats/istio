@@ -1,4 +1,4 @@
-//  Copyright 2018 Istio Authors
+//  Copyright Istio Authors
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
 //  you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@ func init() {
 	flag.StringVar(&settingsFromCommandline.ConfigNamespace, "istio.test.kube.configNamespace", settingsFromCommandline.ConfigNamespace,
 		"Specifies the namespace in which config, discovery and auto-injector are deployed.")
 	flag.StringVar(&settingsFromCommandline.TelemetryNamespace, "istio.test.kube.telemetryNamespace", settingsFromCommandline.TelemetryNamespace,
-		"Specifies the namespace in which mixer, kiali, tracing providers, graphana, prometheus are deployed.")
+		"Specifies the namespace in which kiali, tracing providers, graphana, prometheus are deployed.")
 	flag.StringVar(&settingsFromCommandline.PolicyNamespace, "istio.test.kube.policyNamespace", settingsFromCommandline.PolicyNamespace,
 		"Specifies the namespace in which istio policy checker is deployed.")
 	flag.StringVar(&settingsFromCommandline.IngressNamespace, "istio.test.kube.ingressNamespace", settingsFromCommandline.IngressNamespace,
@@ -40,13 +40,10 @@ func init() {
 		"Timeout applied to deploying Istio into the target Kubernetes environment. Only applies if DeployIstio=true.")
 	flag.DurationVar(&settingsFromCommandline.UndeployTimeout, "istio.test.kube.undeployTimeout", 0,
 		"Timeout applied to undeploying Istio from the target Kubernetes environment. Only applies if DeployIstio=true.")
-	flag.StringVar(&settingsFromCommandline.ChartDir, "istio.test.kube.helm.chartDir", settingsFromCommandline.ChartDir,
-		"Helm chart dir for Istio. Only valid when deploying Istio.")
-	flag.StringVar(&settingsFromCommandline.ValuesFile, "istio.test.kube.helm.valuesFile", settingsFromCommandline.ValuesFile,
-		"Helm values file. This can be an absolute path or relative to chartDir. Only valid when deploying Istio.")
+	flag.StringVar(&settingsFromCommandline.IOPFile, "istio.test.kube.helm.iopFile", settingsFromCommandline.IOPFile,
+		"IstioOperator spec file. This can be an absolute path or relative to repository root.")
 	flag.StringVar(&helmValues, "istio.test.kube.helm.values", helmValues,
 		"Manual overrides for Helm values file. Only valid when deploying Istio.")
 	flag.StringVar(&settingsFromCommandline.CustomSidecarInjectorNamespace, "istio.test.kube.customSidecarInjectorNamespace",
 		settingsFromCommandline.CustomSidecarInjectorNamespace, "Inject the sidecar from the specified namespace")
-
 }

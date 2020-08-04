@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors.
+// Copyright Istio Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,7 +22,6 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	coreV1 "k8s.io/api/core/v1"
-	v1 "k8s.io/api/core/v1"
 	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -66,7 +65,7 @@ var (
 							Labels: map[string]string{"app": "details"},
 						},
 						Spec: coreV1.PodSpec{
-							Containers: []v1.Container{
+							Containers: []coreV1.Container{
 								{Name: "details", Image: "docker.io/istio/examples-bookinfo-details-v1:1.15.0"},
 							},
 						},
@@ -143,8 +142,7 @@ func TestAddToMesh(t *testing.T) {
 			expectedException: false,
 			k8sConfigs:        cannedK8sConfigs,
 			expectedOutput: "deployment details-v1.default updated successfully with Istio sidecar injected.\n" +
-				"Next Step: Add related labels to the deployment to align with Istio's requirement: " +
-				"https://istio.io/docs/setup/kubernetes/additional-setup/requirements/\n",
+				"Next Step: Add related labels to the deployment to align with Istio's requirement: " + RequirementsURL + "\n",
 			namespace: "default",
 		},
 		{
@@ -155,8 +153,7 @@ func TestAddToMesh(t *testing.T) {
 			expectedException: false,
 			k8sConfigs:        cannedK8sConfigs,
 			expectedOutput: "deployment details-v1.default updated successfully with Istio sidecar injected.\n" +
-				"Next Step: Add related labels to the deployment to align with Istio's requirement: " +
-				"https://istio.io/docs/setup/kubernetes/additional-setup/requirements/\n",
+				"Next Step: Add related labels to the deployment to align with Istio's requirement: " + RequirementsURL + "\n",
 			namespace: "default",
 		},
 		{
@@ -255,7 +252,8 @@ func verifyAddToMeshOutput(t *testing.T, c testcase) {
 	crdFactory = mockDynamicClientGenerator(c.dynamicConfigs)
 	var out bytes.Buffer
 	rootCmd := GetRootCmd(c.args)
-	rootCmd.SetOutput(&out)
+	rootCmd.SetOut(&out)
+	rootCmd.SetErr(&out)
 	if c.namespace != "" {
 		namespace = c.namespace
 	}

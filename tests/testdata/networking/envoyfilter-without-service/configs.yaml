@@ -1,12 +1,12 @@
 # Authentication policy to enable mutual TLS for all services (that have sidecar) in the mesh.
-apiVersion: authentication.istio.io/v1alpha1
-kind: MeshPolicy
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
 metadata:
   name: default
   namespace: istio-config
 spec:
-  peers:
-  - mtls: {}
+  mtls:
+    mode: STRICT
 ---
 # Corresponding destination rule to configure client side to use mutual TLS when talking to
 # any service (host) in the mesh.
@@ -91,16 +91,25 @@ metadata:
   name: test-lua
   namespace: istio-system
 spec:
-  workloadLabels:
-    app: envoyfilter-test-app
-  filters:
-    - listenerMatch:
-        listenerType: SIDECAR_OUTBOUND
-        listenerProtocol: HTTP
-      filterName: envoy.lua
-      filterType: HTTP
-      filterConfig:
-        inlineCode: |
-          function envoy_on_request(request_handle)
-            request_handle:logWarn("Hello World")
-          end
+  workloadSelector:
+    labels:
+      app: envoyfilter-test-app
+  configPatches:
+  - applyTo: HTTP_FILTER
+    match:
+      listener:
+        filterChain:
+          filter:
+            name: "envoy.http_connection_manager"
+            subFilter:
+              name: "envoy.router"
+    patch:
+      operation: INSERT_BEFORE
+      value: # lua filter specification
+        name: envoy.lua
+        typed_config:
+          "@type": "type.googleapis.com/envoy.config.filter.http.lua.v2.Lua"
+          inlineCode: |
+            function envoy_on_request(request_handle)
+              request_handle:logWarn("Hello World")
+            end

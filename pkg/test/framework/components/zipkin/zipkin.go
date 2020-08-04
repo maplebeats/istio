@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@ package zipkin
 import (
 	"testing"
 
-	"istio.io/istio/pkg/test/framework/components/environment"
 	"istio.io/istio/pkg/test/framework/resource"
 )
 
@@ -28,6 +27,11 @@ type Instance interface {
 	// QueryTraces gets at most number of limit most recent available traces from zipkin.
 	// spanName filters that only trace with the given span name will be included.
 	QueryTraces(limit int, spanName, annotationQuery string) ([]Trace, error)
+}
+
+type Config struct {
+	// Cluster to be used in a multicluster environment
+	Cluster resource.Cluster
 }
 
 // Span represents a single span, which includes span attributes for verification
@@ -46,18 +50,14 @@ type Trace struct {
 }
 
 // New returns a new instance of zipkin.
-func New(ctx resource.Context) (i Instance, err error) {
-	err = resource.UnsupportedEnvironment(ctx.Environment())
-	ctx.Environment().Case(environment.Kube, func() {
-		i, err = newKube(ctx)
-	})
-	return
+func New(ctx resource.Context, c Config) (i Instance, err error) {
+	return newKube(ctx, c)
 }
 
 // NewOrFail returns a new zipkin instance or fails test.
-func NewOrFail(t *testing.T, ctx resource.Context) Instance {
+func NewOrFail(t *testing.T, ctx resource.Context, c Config) Instance {
 	t.Helper()
-	i, err := New(ctx)
+	i, err := New(ctx, c)
 	if err != nil {
 		t.Fatalf("zipkin.NewOrFail: %v", err)
 	}
