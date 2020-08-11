@@ -706,7 +706,7 @@ No
 </tr>
 <tr id="EgressGatewayConfig-labels">
 <td><code>labels</code></td>
-<td><code><a href="#GatewayLabelsConfig">GatewayLabelsConfig</a></code></td>
+<td><code>map&lt;string,&nbsp;string&gt;</code></td>
 <td>
 </td>
 <td>
@@ -927,41 +927,6 @@ No
 <td>
 <p>K8s rolling update strategy</p>
 
-</td>
-<td>
-No
-</td>
-</tr>
-</tbody>
-</table>
-</section>
-<h2 id="GatewayLabelsConfig">GatewayLabelsConfig</h2>
-<section>
-<p>GatewayLabelsConfig is a set of Configuration for gateway labels.</p>
-
-<table class="message-fields">
-<thead>
-<tr>
-<th>Field</th>
-<th>Type</th>
-<th>Description</th>
-<th>Required</th>
-</tr>
-</thead>
-<tbody>
-<tr id="GatewayLabelsConfig-app">
-<td><code>app</code></td>
-<td><code>string</code></td>
-<td>
-</td>
-<td>
-No
-</td>
-</tr>
-<tr id="GatewayLabelsConfig-istio">
-<td><code>istio</code></td>
-<td><code>string</code></td>
-<td>
 </td>
 <td>
 No
@@ -1668,7 +1633,7 @@ No
 </tr>
 <tr id="IngressGatewayConfig-labels">
 <td><code>labels</code></td>
-<td><code><a href="#GatewayLabelsConfig">GatewayLabelsConfig</a></code></td>
+<td><code>map&lt;string,&nbsp;string&gt;</code></td>
 <td>
 </td>
 <td>
@@ -2656,6 +2621,17 @@ No
 No
 </td>
 </tr>
+<tr id="TelemetryV2PrometheusConfig-config_override">
+<td><code>configOverride</code></td>
+<td><code><a href="#TelemetryV2PrometheusConfig-ConfigOverride">ConfigOverride</a></code></td>
+<td>
+<p>Overrides default telemetry v2 filter configuration.</p>
+
+</td>
+<td>
+No
+</td>
+</tr>
 </tbody>
 </table>
 </section>
@@ -3068,7 +3044,7 @@ No
 <td><code>holdApplicationUntilProxyStarts</code></td>
 <td><code><a href="https://developers.google.com/protocol-buffers/docs/reference/google.protobuf#boolvalue">BoolValue</a></code></td>
 <td>
-<p>Causes the sidecar to be injected at the front of the container list and blocks the start of the other containers until the proxy is ready</p>
+<p>Controls if sidecar is injected at the front of the container list and blocks the start of the other containers until the proxy is ready</p>
 
 </td>
 <td>
@@ -3879,6 +3855,54 @@ No
 <section>
 <p>GOTYPE: interface{}</p>
 
+</section>
+<h2 id="TelemetryV2PrometheusConfig-ConfigOverride">TelemetryV2PrometheusConfig.ConfigOverride</h2>
+<section>
+<table class="message-fields">
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Description</th>
+<th>Required</th>
+</tr>
+</thead>
+<tbody>
+<tr id="TelemetryV2PrometheusConfig-ConfigOverride-gateway">
+<td><code>gateway</code></td>
+<td><code><a href="#TypeMapStringInterface">TypeMapStringInterface</a></code></td>
+<td>
+<p>Overrides default gateway telemetry v2 configuration.</p>
+
+</td>
+<td>
+No
+</td>
+</tr>
+<tr id="TelemetryV2PrometheusConfig-ConfigOverride-inboundSidecar">
+<td><code>inboundSidecar</code></td>
+<td><code><a href="#TypeMapStringInterface">TypeMapStringInterface</a></code></td>
+<td>
+<p>Overrides default inbound sidecar telemetry v2 configuration.</p>
+
+</td>
+<td>
+No
+</td>
+</tr>
+<tr id="TelemetryV2PrometheusConfig-ConfigOverride-outboundSidecar">
+<td><code>outboundSidecar</code></td>
+<td><code><a href="#TypeMapStringInterface">TypeMapStringInterface</a></code></td>
+<td>
+<p>Overrides default outbound sidecar telemetry v2 configuration.</p>
+
+</td>
+<td>
+No
+</td>
+</tr>
+</tbody>
+</table>
 </section>
 <h2 id="OutboundTrafficPolicyConfig-Mode">OutboundTrafficPolicyConfig.Mode</h2>
 <section>

@@ -22,8 +22,9 @@ var _ resource.Origin = &testOrigin{}
 var _ resource.Reference = &testReference{}
 
 type testOrigin struct {
-	name string
-	ref  resource.Reference
+	name     string
+	ref      resource.Reference
+	fieldMap map[string]int
 }
 
 func (o testOrigin) FriendlyName() string {
@@ -38,10 +39,23 @@ func (o testOrigin) Reference() resource.Reference {
 	return o.ref
 }
 
+func (o testOrigin) FieldMap() map[string]int {
+	return o.fieldMap
+}
+
 type testReference struct {
 	name string
 }
 
 func (r testReference) String() string {
 	return r.name
+}
+
+func MockResource(name string) *resource.Instance {
+	return &resource.Instance{
+		Metadata: resource.Metadata{
+			FullName: resource.NewShortOrFullName("default", name),
+		},
+		Origin: testOrigin{name: name},
+	}
 }
