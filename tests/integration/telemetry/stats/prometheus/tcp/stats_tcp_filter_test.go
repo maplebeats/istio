@@ -1,3 +1,4 @@
+// +build integ
 // Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -63,7 +64,7 @@ func TestTcpMetric(t *testing.T) { // nolint:interfacer
 				bookinfo.NetworkingTCPDbRule.LoadWithNamespaceOrFail(t, bookinfoNs.Name()),
 			)
 
-			systemNM := namespace.ClaimSystemNamespaceOrFail(ctx, ctx)
+			systemNM := istio.ClaimSystemNamespaceOrFail(ctx, ctx)
 			cleanup, err := file.AsString(cleanupFilterConfig)
 			if err != nil {
 				t.Errorf("unable to load config %s, err:%v", cleanupFilterConfig, err)

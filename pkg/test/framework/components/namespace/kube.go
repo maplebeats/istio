@@ -27,7 +27,6 @@ import (
 
 	"istio.io/api/label"
 	"istio.io/istio/pkg/test/framework/components/environment/kube"
-	"istio.io/istio/pkg/test/framework/components/istio"
 	"istio.io/istio/pkg/test/framework/resource"
 	kube2 "istio.io/istio/pkg/test/kube"
 	"istio.io/istio/pkg/test/scopes"
@@ -46,10 +45,10 @@ type kubeNamespace struct {
 	ctx  resource.Context
 }
 
-func (n *kubeNamespace) Dump() {
+func (n *kubeNamespace) Dump(ctx resource.Context) {
 	scopes.Framework.Errorf("=== Dumping Namespace %s State...", n.name)
 
-	d, err := n.ctx.CreateTmpDirectory(n.name + "-state")
+	d, err := ctx.CreateTmpDirectory(n.name + "-state")
 	if err != nil {
 		scopes.Framework.Errorf("Unable to create directory for dumping %s contents: %v", n.name, err)
 		return
@@ -91,16 +90,11 @@ func (n *kubeNamespace) Close() (err error) {
 
 func claimKube(ctx resource.Context, name string, injectSidecar bool) (Instance, error) {
 	env := ctx.Environment().(*kube.Environment)
-	cfg, err := istio.DefaultConfig(ctx)
-	if err != nil {
-		return nil, err
-	}
 
 	for _, cluster := range env.KubeClusters {
 		if !kube2.NamespaceExists(cluster, name) {
 			nsConfig := Config{
-				Inject:   injectSidecar,
-				Revision: cfg.CustomSidecarInjectorNamespace,
+				Inject: injectSidecar,
 			}
 
 			if _, err := cluster.CoreV1().Namespaces().Create(context.TODO(), &kubeApiCore.Namespace{

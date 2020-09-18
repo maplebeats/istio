@@ -15,15 +15,20 @@
 package xdstest
 
 import (
+	"fmt"
 	"reflect"
+	"sort"
+	"testing"
 
 	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	endpoint "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tcpproxy "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
+	tls "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
+	"github.com/golang/protobuf/jsonpb"
 	"github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/ptypes"
 	"github.com/golang/protobuf/ptypes/any"
@@ -71,13 +76,21 @@ func ExtractListener(name string, ll []*listener.Listener) *listener.Listener {
 	return nil
 }
 
+func ExtractListenerFilters(l *listener.Listener) map[string]*listener.ListenerFilter {
+	res := map[string]*listener.ListenerFilter{}
+	for _, lf := range l.ListenerFilters {
+		res[lf.Name] = lf
+	}
+	return res
+}
+
 func ExtractTCPProxy(t test.Failer, fcs *listener.FilterChain) *tcpproxy.TcpProxy {
 	for _, fc := range fcs.Filters {
 		if fc.Name == wellknown.TCPProxy {
 			tcpProxy := &tcpproxy.TcpProxy{}
 			if fc.GetTypedConfig() != nil {
 				if err := ptypes.UnmarshalAny(fc.GetTypedConfig(), tcpProxy); err != nil {
-					t.Fatalf("failed to unmarshal tcp proxy")
+					t.Fatalf("failed to unmarshal tcp proxy: %v", err)
 				}
 			}
 			return tcpProxy
@@ -86,32 +99,59 @@ func ExtractTCPProxy(t test.Failer, fcs *listener.FilterChain) *tcpproxy.TcpProx
 	return nil
 }
 
-func ExtractEndpoints(endpoints []*endpoint.ClusterLoadAssignment) map[string][]string {
+func ExtractHTTPConnectionManager(t test.Failer, fcs *listener.FilterChain) *hcm.HttpConnectionManager {
+	for _, fc := range fcs.Filters {
+		if fc.Name == wellknown.HTTPConnectionManager {
+			h := &hcm.HttpConnectionManager{}
+			if fc.GetTypedConfig() != nil {
+				if err := ptypes.UnmarshalAny(fc.GetTypedConfig(), h); err != nil {
+					t.Fatalf("failed to unmarshal hcm: %v", err)
+				}
+			}
+			return h
+		}
+	}
+	return nil
+}
+
+func ExtractLoadAssignments(cla []*endpoint.ClusterLoadAssignment) map[string][]string {
 	got := map[string][]string{}
-	for _, cla := range endpoints {
+	for _, cla := range cla {
 		if cla == nil {
 			continue
 		}
-		for _, ep := range cla.Endpoints {
-			for _, lb := range ep.LbEndpoints {
-				if lb.GetEndpoint().Address.GetSocketAddress() != nil {
-					got[cla.ClusterName] = append(got[cla.ClusterName], lb.GetEndpoint().Address.GetSocketAddress().Address)
-				} else {
-					got[cla.ClusterName] = append(got[cla.ClusterName], lb.GetEndpoint().Address.GetPipe().Path)
-				}
+		got[cla.ClusterName] = append(got[cla.ClusterName], ExtractEndpoints(cla)...)
+	}
+	return got
+}
+
+func ExtractEndpoints(cla *endpoint.ClusterLoadAssignment) []string {
+	if cla == nil {
+		return nil
+	}
+	got := []string{}
+	for _, ep := range cla.Endpoints {
+		for _, lb := range ep.LbEndpoints {
+			if lb.GetEndpoint().Address.GetSocketAddress() != nil {
+				got = append(got, fmt.Sprintf("%s:%d", lb.GetEndpoint().Address.GetSocketAddress().Address, lb.GetEndpoint().Address.GetSocketAddress().GetPortValue()))
+			} else {
+				got = append(got, lb.GetEndpoint().Address.GetPipe().Path)
 			}
 		}
 	}
 	return got
 }
 
-func ExtractCluster(name string, cc []*cluster.Cluster) *cluster.Cluster {
+func ExtractClusters(cc []*cluster.Cluster) map[string]*cluster.Cluster {
+	res := map[string]*cluster.Cluster{}
 	for _, c := range cc {
-		if c.Name == name {
-			return c
-		}
+		res[c.Name] = c
 	}
-	return nil
+	return res
+}
+
+func ExtractCluster(name string, cc []*cluster.Cluster) *cluster.Cluster {
+	return ExtractClusters(cc)[name]
 }
 
 func ExtractClusterEndpoints(clusters []*cluster.Cluster) map[string][]string {
@@ -119,7 +159,7 @@ func ExtractClusterEndpoints(clusters []*cluster.Cluster) map[string][]string {
 	for _, c := range clusters {
 		cla = append(cla, c.LoadAssignment)
 	}
-	return ExtractEndpoints(cla)
+	return ExtractLoadAssignments(cla)
 }
 
 func ExtractEdsClusterNames(cl []*cluster.Cluster) []string {
@@ -132,6 +172,28 @@ func ExtractEdsClusterNames(cl []*cluster.Cluster) []string {
 			}
 		}
 		res = append(res, c.Name)
+	}
+	return res
+}
+
+func ExtractTLSSecrets(t test.Failer, secrets []*any.Any) map[string]*tls.Secret {
+	res := map[string]*tls.Secret{}
+	for _, a := range secrets {
+		scrt := &tls.Secret{}
+		if err := ptypes.UnmarshalAny(a, scrt); err != nil {
+			t.Fatal(err)
+		}
+		res[scrt.Name] = scrt
+	}
+	return res
+}
+
+func FilterClusters(cl []*cluster.Cluster, f func(c *cluster.Cluster) bool) []*cluster.Cluster {
+	res := make([]*cluster.Cluster, 0, len(cl))
+	for _, c := range cl {
+		if f(c) {
+			res = append(res, c)
+		}
 	}
 	return res
 }
@@ -164,4 +226,26 @@ func InterfaceSlice(slice interface{}) []interface{} {
 	}
 
 	return ret
+}
+
+func Dump(t testing.TB, p proto.Message) string {
+	v := reflect.ValueOf(p)
+	if p == nil || (v.Kind() == reflect.Ptr && v.IsNil()) {
+		return "nil"
+	}
+	s, err := (&jsonpb.Marshaler{Indent: "  "}).MarshalToString(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func MapKeys(mp interface{}) []string {
+	keys := reflect.ValueOf(mp).MapKeys()
+	res := []string{}
+	for _, k := range keys {
+		res = append(res, k.String())
+	}
+	sort.Strings(res)
+	return res
 }

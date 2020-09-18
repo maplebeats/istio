@@ -28,6 +28,7 @@ import (
 	networking "istio.io/api/networking/v1alpha3"
 	security_beta "istio.io/api/security/v1beta1"
 	api "istio.io/api/type/v1beta1"
+	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/constants"
 )
 
@@ -718,7 +719,13 @@ func TestValidateGateway(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ValidateGateway(someName, someNamespace, tt.in)
+			_, err := ValidateGateway(config.Config{
+				Meta: config.Meta{
+					Name:      someName,
+					Namespace: someNamespace,
+				},
+				Spec: tt.in,
+			})
 			if err == nil && tt.out != "" {
 				t.Fatalf("ValidateGateway(%v) = nil, wanted %q", tt.in, tt.out)
 			} else if err != nil && tt.out == "" {
@@ -1855,6 +1862,78 @@ func TestValidateHTTPRoute(t *testing.T) {
 				},
 			}},
 		}, valid: false},
+		{name: "envoy escaped % set", route: &networking.HTTPRoute{
+			Route: []*networking.HTTPRouteDestination{{
+				Destination: &networking.Destination{Host: "foo.baz"},
+				Headers: &networking.Headers{
+					Response: &networking.Headers_HeaderOperations{
+						Set: map[string]string{
+							"i-love-istio": "100%%",
+						},
+					},
+				},
+			}},
+		}, valid: true},
+		{name: "envoy variable set", route: &networking.HTTPRoute{
+			Route: []*networking.HTTPRouteDestination{{
+				Destination: &networking.Destination{Host: "foo.baz"},
+				Headers: &networking.Headers{
+					Response: &networking.Headers_HeaderOperations{
+						Set: map[string]string{
+							"name": "%HOSTNAME%",
+						},
+					},
+				},
+			}},
+		}, valid: true},
+		{name: "envoy unescaped % set", route: &networking.HTTPRoute{
+			Route: []*networking.HTTPRouteDestination{{
+				Destination: &networking.Destination{Host: "foo.baz"},
+				Headers: &networking.Headers{
+					Response: &networking.Headers_HeaderOperations{
+						Set: map[string]string{
+							"name": "abcd%oijasodifj",
+						},
+					},
+				},
+			}},
+		}, valid: false},
+		{name: "envoy escaped % add", route: &networking.HTTPRoute{
+			Route: []*networking.HTTPRouteDestination{{
+				Destination: &networking.Destination{Host: "foo.baz"},
+				Headers: &networking.Headers{
+					Response: &networking.Headers_HeaderOperations{
+						Add: map[string]string{
+							"i-love-istio": "100%% and more",
+						},
+					},
+				},
+			}},
+		}, valid: true},
+		{name: "envoy variable add", route: &networking.HTTPRoute{
+			Route: []*networking.HTTPRouteDestination{{
+				Destination: &networking.Destination{Host: "foo.baz"},
+				Headers: &networking.Headers{
+					Response: &networking.Headers_HeaderOperations{
+						Add: map[string]string{
+							"name": "hello %HOSTNAME%",
+						},
+					},
+				},
+			}},
+		}, valid: true},
+		{name: "envoy unescaped % add", route: &networking.HTTPRoute{
+			Route: []*networking.HTTPRouteDestination{{
+				Destination: &networking.Destination{Host: "foo.baz"},
+				Headers: &networking.Headers{
+					Response: &networking.Headers_HeaderOperations{
+						Add: map[string]string{
+							"name": "abcd%oijasodifj",
+						},
+					},
+				},
+			}},
+		}, valid: false},
 		{name: "null header match", route: &networking.HTTPRoute{
 			Route: []*networking.HTTPRouteDestination{{
 				Destination: &networking.Destination{Host: "foo.bar"},
@@ -2034,14 +2113,14 @@ func TestValidateVirtualService(t *testing.T) {
 				}},
 			}},
 		}, valid: false},
-		{name: "no hosts", in: &networking.VirtualService{
+		{name: "delegate with no hosts", in: &networking.VirtualService{
 			Hosts: nil,
 			Http: []*networking.HTTPRoute{{
 				Route: []*networking.HTTPRouteDestination{{
 					Destination: &networking.Destination{Host: "foo.baz"},
 				}},
 			}},
-		}, valid: false},
+		}, valid: true},
 		{name: "bad host", in: &networking.VirtualService{
 			Hosts: []string{"foo.ba!r"},
 			Http: []*networking.HTTPRoute{{
@@ -2138,7 +2217,7 @@ func TestValidateVirtualService(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := ValidateVirtualService("", "", tc.in); (err == nil) != tc.valid {
+			if _, err := ValidateVirtualService(config.Config{Spec: tc.in}); (err == nil) != tc.valid {
 				t.Fatalf("got valid=%v but wanted valid=%v: %v", err == nil, tc.valid, err)
 			}
 		})
@@ -2297,7 +2376,13 @@ func TestValidateDestinationRule(t *testing.T) {
 		}, valid: true},
 	}
 	for _, c := range cases {
-		if got := ValidateDestinationRule(someName, someNamespace, c.in); (got == nil) != c.valid {
+		if _, got := ValidateDestinationRule(config.Config{
+			Meta: config.Meta{
+				Name:      someName,
+				Namespace: someNamespace,
+			},
+			Spec: c.in,
+		}); (got == nil) != c.valid {
 			t.Errorf("ValidateDestinationRule failed on %v: got valid=%v but wanted valid=%v: %v",
 				c.name, got == nil, c.valid, got)
 		}
@@ -2371,6 +2456,15 @@ func TestValidateTrafficPolicy(t *testing.T) {
 			},
 			OutlierDetection: &networking.OutlierDetection{
 				MinHealthPercent: -1,
+			},
+		},
+			valid: false},
+		{name: "invalid traffic policy, both upgrade and use client protocol set", in: networking.TrafficPolicy{
+			ConnectionPool: &networking.ConnectionPoolSettings{
+				Http: &networking.ConnectionPoolSettings_HTTPSettings{
+					H2UpgradePolicy:   networking.ConnectionPoolSettings_HTTPSettings_UPGRADE,
+					UseClientProtocol: true,
+				},
 			},
 		},
 			valid: false},
@@ -2889,7 +2983,13 @@ func TestValidateEnvoyFilter(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ValidateEnvoyFilter(someName, someNamespace, tt.in)
+			_, err := ValidateEnvoyFilter(config.Config{
+				Meta: config.Meta{
+					Name:      someName,
+					Namespace: someNamespace,
+				},
+				Spec: tt.in,
+			})
 			if err == nil && tt.error != "" {
 				t.Fatalf("ValidateEnvoyFilter(%v) = nil, wanted %q", tt.in, tt.error)
 			} else if err != nil && tt.error == "" {
@@ -3269,7 +3369,13 @@ func TestValidateServiceEntries(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := ValidateServiceEntry(someName, someNamespace, &c.in); (got == nil) != c.valid {
+			if _, got := ValidateServiceEntry(config.Config{
+				Meta: config.Meta{
+					Name:      someName,
+					Namespace: someNamespace,
+				},
+				Spec: &c.in,
+			}); (got == nil) != c.valid {
 				t.Errorf("ValidateServiceEntry got valid=%v but wanted valid=%v: %v",
 					got == nil, c.valid, got)
 			}
@@ -3903,7 +4009,7 @@ func TestValidateAuthorizationPolicy(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := ValidateAuthorizationPolicy("", "", c.in); (got == nil) != c.valid {
+			if _, got := ValidateAuthorizationPolicy(config.Config{Spec: c.in}); (got == nil) != c.valid {
 				t.Errorf("got: %v\nwant: %v", got, c.valid)
 			}
 		})
@@ -4372,7 +4478,13 @@ func TestValidateSidecar(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := ValidateSidecar("foo", "bar", tt.in)
+			_, err := ValidateSidecar(config.Config{
+				Meta: config.Meta{
+					Name:      "foo",
+					Namespace: "bar",
+				},
+				Spec: tt.in,
+			})
 			if err == nil && !tt.valid {
 				t.Fatalf("ValidateSidecar(%v) = true, wanted false", tt.in)
 			} else if err != nil && tt.valid {
@@ -4811,7 +4923,13 @@ func TestValidateRequestAuthentication(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := ValidateRequestAuthentication(c.configName, someNamespace, c.in); (got == nil) != c.valid {
+			if _, got := ValidateRequestAuthentication(config.Config{
+				Meta: config.Meta{
+					Name:      c.configName,
+					Namespace: someNamespace,
+				},
+				Spec: c.in,
+			}); (got == nil) != c.valid {
 				t.Errorf("got(%v) != want(%v)\n", got, c.valid)
 			}
 		})
@@ -4925,7 +5043,13 @@ func TestValidatePeerAuthentication(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := ValidatePeerAuthentication(c.configName, someNamespace, c.in); (got == nil) != c.valid {
+			if _, got := ValidatePeerAuthentication(config.Config{
+				Meta: config.Meta{
+					Name:      c.configName,
+					Namespace: someNamespace,
+				},
+				Spec: c.in,
+			}); (got == nil) != c.valid {
 				t.Errorf("got(%v) != want(%v)\n", got, c.valid)
 			}
 		})

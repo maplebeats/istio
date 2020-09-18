@@ -1,3 +1,4 @@
+// +build integ
 // Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,13 +24,14 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/Masterminds/sprig"
+	"github.com/Masterminds/sprig/v3"
 
 	"istio.io/istio/pkg/test"
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/framework/components/echo"
 	"istio.io/istio/pkg/test/scopes"
 	"istio.io/istio/pkg/test/util/retry"
+	"istio.io/istio/tests/integration/pilot/common"
 )
 
 const localityTemplate = `
@@ -111,20 +113,20 @@ func TestLocality(t *testing.T) {
 					LocalityInput{
 						LocalitySetting: localityFailover,
 						Resolution:      "DNS",
-						Local:           apps.podB.Config().Service,
-						Remote:          apps.podC.Config().Service,
+						Local:           common.PodBSvc,
+						Remote:          common.PodCSvc,
 					},
-					expectAllTrafficTo(apps.podB.Config().Service),
+					expectAllTrafficTo(common.PodBSvc),
 				},
 				{
 					"Prioritized/EDS",
 					LocalityInput{
 						LocalitySetting: localityFailover,
 						Resolution:      "STATIC",
-						Local:           apps.podC.Address(),
-						Remote:          apps.podB.Address(),
+						Local:           apps.PodC[0].Address(),
+						Remote:          apps.PodB[0].Address(),
 					},
-					expectAllTrafficTo(apps.podC.Config().Service),
+					expectAllTrafficTo(common.PodCSvc),
 				},
 				{
 					"Failover/CDS",
@@ -132,10 +134,10 @@ func TestLocality(t *testing.T) {
 						LocalitySetting: localityFailover,
 						Resolution:      "DNS",
 						Local:           "fake-should-fail.example.com",
-						NearLocal:       apps.podB.Config().Service,
-						Remote:          apps.podC.Config().Service,
+						NearLocal:       common.PodBSvc,
+						Remote:          common.PodCSvc,
 					},
-					expectAllTrafficTo(apps.podB.Config().Service),
+					expectAllTrafficTo(common.PodBSvc),
 				},
 				{
 					"Failover/EDS",
@@ -143,23 +145,23 @@ func TestLocality(t *testing.T) {
 						LocalitySetting: localityFailover,
 						Resolution:      "STATIC",
 						Local:           "10.10.10.10",
-						NearLocal:       apps.podC.Address(),
-						Remote:          apps.podB.Address(),
+						NearLocal:       apps.PodC[0].Address(),
+						Remote:          apps.PodB[0].Address(),
 					},
-					expectAllTrafficTo(apps.podC.Config().Service),
+					expectAllTrafficTo(common.PodCSvc),
 				},
 				{
 					"Distribute/CDS",
 					LocalityInput{
 						LocalitySetting: localityDistribute,
 						Resolution:      "DNS",
-						Local:           apps.podC.Config().Service,
-						NearLocal:       apps.podB.Config().Service,
+						Local:           common.PodCSvc,
+						NearLocal:       common.PodBSvc,
 						Remote:          "fake-should-fail.example.com",
 					},
 					map[string]int{
-						apps.podB.Config().Service: sendCount * .8,
-						apps.podC.Config().Service: sendCount * .2,
+						common.PodBSvc: sendCount * .8,
+						common.PodCSvc: sendCount * .2,
 					},
 				},
 				{
@@ -167,13 +169,13 @@ func TestLocality(t *testing.T) {
 					LocalityInput{
 						LocalitySetting: localityDistribute,
 						Resolution:      "STATIC",
-						Local:           apps.podB.Address(),
-						NearLocal:       apps.podC.Address(),
+						Local:           apps.PodB[0].Address(),
+						NearLocal:       apps.PodC[0].Address(),
 						Remote:          "10.10.10.10",
 					},
 					map[string]int{
-						apps.podC.Config().Service: sendCount * .8,
-						apps.podB.Config().Service: sendCount * .2,
+						common.PodCSvc: sendCount * .8,
+						common.PodBSvc: sendCount * .2,
 					},
 				},
 			}
@@ -181,9 +183,9 @@ func TestLocality(t *testing.T) {
 				ctx.NewSubTest(tt.name).Run(func(ctx framework.TestContext) {
 					hostname := fmt.Sprintf("%s-fake-locality.example.com", strings.ToLower(strings.ReplaceAll(tt.name, "/", "-")))
 					tt.input.Host = hostname
-					applyAndCleanup(ctx, apps.namespace.Name(), runTemplate(ctx, localityTemplate, tt.input))
+					applyAndCleanup(ctx, apps.Namespace.Name(), runTemplate(ctx, localityTemplate, tt.input))
 					retry.UntilSuccessOrFail(ctx, func() error {
-						return sendTraffic(apps.podA, hostname, tt.expected)
+						return sendTraffic(apps.PodA[0], hostname, tt.expected)
 					}, retry.Delay(250*time.Millisecond))
 				})
 			}
@@ -233,7 +235,7 @@ func sendTraffic(from echo.Instance, host string, expected map[string]int) error
 	scopes.Framework.Infof("Got responses: %+v", got)
 	for svc, reqs := range got {
 		expect := expected[svc]
-		if !almostEquals(reqs, expect, 3) {
+		if !common.AlmostEquals(reqs, expect, 3) {
 			return fmt.Errorf("unexpected request distribution. Expected: %+v, got: %+v", expected, got)
 		}
 	}

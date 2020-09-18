@@ -16,11 +16,12 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
 
-	"github.com/hashicorp/go-multierror"
+	multierror "github.com/hashicorp/go-multierror"
 	"github.com/spf13/cobra"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,6 +31,7 @@ import (
 
 	"istio.io/api/annotation"
 	"istio.io/istio/istioctl/pkg/util/handlers"
+	istioStatus "istio.io/istio/pilot/cmd/pilot-agent/status"
 	"istio.io/istio/pkg/config/schema/collections"
 	"istio.io/pkg/log"
 )
@@ -40,15 +42,18 @@ func removeFromMeshCmd() *cobra.Command {
 		Aliases: []string{"rm"},
 		Short:   "Remove workloads from Istio service mesh",
 		Long: `'istioctl experimental remove-from-mesh' restarts pods without an Istio sidecar or removes external service access configuration.
-
 Use 'remove-from-mesh' to quickly test uninjected behavior as part of compatibility troubleshooting.
-
 The 'add-to-mesh' command can be used to add or restore the sidecar.
 
 THESE COMMANDS ARE UNDER ACTIVE DEVELOPMENT AND NOT READY FOR PRODUCTION USE.`,
-		Example: `
-# Restart all productpage pods without an Istio sidecar
-istioctl experimental remove-from-mesh service productpage`,
+		Example: `  # Restart all productpage pods without an Istio sidecar
+  istioctl experimental remove-from-mesh service productpage
+
+  # Restart all details-v1 pods without an Istio sidecar
+  istioctl x rm service details-v1
+
+  # Restart all ratings-v1 pods without an Istio sidecar
+  istioctl x rm deploy ratings-v1`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cmd.HelpFunc()(cmd, args)
 			if len(args) != 0 {
@@ -65,17 +70,22 @@ istioctl experimental remove-from-mesh service productpage`,
 
 func deploymentUnMeshifyCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "deployment <deployment>",
-		Short: "Remove deployment from Istio service mesh",
+		Use:     "deployment <deployment>",
+		Aliases: []string{"deploy", "dep"},
+		Short:   "Remove deployment from Istio service mesh",
 		Long: `'istioctl experimental remove-from-mesh deployment' restarts pods with the Istio sidecar un-injected.
-
 'remove-from-mesh' is a compatibility troubleshooting tool.
 
 THIS COMMAND IS UNDER ACTIVE DEVELOPMENT AND NOT READY FOR PRODUCTION USE.
 `,
-		Example: `
-# Restart all productpage-v1 pods without an Istio sidecar
-istioctl experimental remove-from-mesh deployment productpage-v1`,
+		Example: `  # Restart all productpage-v1 pods without an Istio sidecar
+  istioctl experimental remove-from-mesh deployment productpage-v1
+
+  # Restart all details-v1 pods without an Istio sidecar
+  istioctl x remove-from-mesh deploy details-v1
+
+  # Restart all ratings-v1 pods without an Istio sidecar
+  istioctl x rm dep ratings-v1`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return fmt.Errorf("expecting deployment name")
@@ -100,17 +110,22 @@ istioctl experimental remove-from-mesh deployment productpage-v1`,
 
 func svcUnMeshifyCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "service <service>",
-		Short: "Remove Service from Istio service mesh",
+		Use:     "service <service>",
+		Aliases: []string{"svc"},
+		Short:   "Remove Service from Istio service mesh",
 		Long: `'istioctl experimental remove-from-mesh service' restarts pods with the Istio sidecar un-injected.
-
 'remove-from-mesh' is a compatibility troubleshooting tool.
 
 THIS COMMAND IS UNDER ACTIVE DEVELOPMENT AND NOT READY FOR PRODUCTION USE.
 `,
-		Example: `
-# Restart all productpage pods without an Istio sidecar
-istioctl experimental remove-from-mesh service productpage`,
+		Example: `  # Restart all productpage pods without an Istio sidecar
+  istioctl experimental remove-from-mesh service productpage
+
+  # Restart all details-v1 pods without an Istio sidecar
+  istioctl x remove-from-mesh svc details-v1
+
+  # Restart all ratings-v1 pods without an Istio sidecar
+  istioctl x rm svc ratings-v1`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return fmt.Errorf("expecting service name")
@@ -141,17 +156,23 @@ istioctl experimental remove-from-mesh service productpage`,
 
 func externalSvcUnMeshifyCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "external-service <svcname>",
-		Short: "Remove Service Entry and Kubernetes Service for the external service from Istio service mesh",
+		Use:     "external-service <svcname>",
+		Aliases: []string{"es"},
+		Short:   "Remove Service Entry and Kubernetes Service for the external service from Istio service mesh",
 		Long: `'istioctl experimental remove-from-mesh external-service' removes the ServiceEntry and
 the Kubernetes Service for the specified external service (e.g. services running on a VM) from Istio service mesh.
 The typical usage scenario is Mesh Expansion on VMs.
 
 THIS COMMAND IS UNDER ACTIVE DEVELOPMENT AND NOT READY FOR PRODUCTION USE.
 `,
-		Example: `
-# Remove "vmhttp" service entry rules
-istioctl experimental remove-from-mesh external-service vmhttp`,
+		Example: `  # Remove "vmhttp" service entry rules
+  istioctl experimental remove-from-mesh external-service vmhttp
+
+  # Remove "vmhttp" service entry rules
+  istioctl x remove-from-mesh es vmhttp
+
+  # Remove "vmhttp" service entry rules
+  istioctl x rm es vmhttp`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return fmt.Errorf("expecting external service name")
@@ -200,12 +221,27 @@ func unInjectSideCarFromDeployment(client kubernetes.Interface, deps []appsv1.De
 				continue
 			}
 		}
+
+		var appProbe istioStatus.KubeAppProbers
+		appProbeStr := retrieveAppProbe(podSpec.Containers)
+		if appProbeStr != "" {
+			err := json.Unmarshal([]byte(appProbeStr), &appProbe)
+			errs = multierror.Append(errs, err)
+		}
+		if appProbe != nil {
+			podSpec.Containers = restoreAppProbes(podSpec.Containers, appProbe)
+		}
+
 		podSpec.InitContainers = removeInjectedContainers(podSpec.InitContainers, initContainerName)
+		podSpec.InitContainers = removeInjectedContainers(podSpec.InitContainers, initValidationContainerName)
 		podSpec.InitContainers = removeInjectedContainers(podSpec.InitContainers, enableCoreDumpContainerName)
 		podSpec.Containers = removeInjectedContainers(podSpec.Containers, proxyContainerName)
-		podSpec.Volumes = removeInjectedVolumes(podSpec.Volumes, envoyVolumeName)
 		podSpec.Volumes = removeInjectedVolumes(podSpec.Volumes, certVolumeName)
+		podSpec.Volumes = removeInjectedVolumes(podSpec.Volumes, dataVolumeName)
+		podSpec.Volumes = removeInjectedVolumes(podSpec.Volumes, envoyVolumeName)
 		podSpec.Volumes = removeInjectedVolumes(podSpec.Volumes, jwtTokenVolumeName)
+		podSpec.Volumes = removeInjectedVolumes(podSpec.Volumes, pilotCertVolumeName)
+		podSpec.Volumes = removeInjectedVolumes(podSpec.Volumes, podInfoVolumeName)
 		removeDNSConfig(podSpec.DNSConfig)
 		res.Spec.Template.Spec = *podSpec
 		// If we are in an auto-inject namespace, removing the sidecar isn't enough, we
@@ -220,9 +256,10 @@ func unInjectSideCarFromDeployment(client kubernetes.Interface, deps []appsv1.De
 		}
 		d := &appsv1.Deployment{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      dep.Name,
-				Namespace: dep.Namespace,
-				UID:       dep.UID,
+				Name:            dep.Name,
+				Namespace:       dep.Namespace,
+				UID:             dep.UID,
+				OwnerReferences: dep.OwnerReferences,
 			},
 		}
 		if _, err := client.AppsV1().Deployments(svcNamespace).UpdateStatus(context.TODO(), d, metav1.UpdateOptions{}); err != nil {

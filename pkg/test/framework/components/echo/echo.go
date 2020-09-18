@@ -63,13 +63,6 @@ type Instance interface {
 	// Address of the service (e.g. Kubernetes cluster IP). May be "" if headless.
 	Address() string
 
-	// WaitUntilCallable waits until each of the provided instances are callable from
-	// this Instance. If this instance has a sidecar, this waits until Envoy has
-	// received outbound configuration (e.g. clusters, routes, listeners) for every
-	// port.
-	WaitUntilCallable(instances ...Instance) error
-	WaitUntilCallableOrFail(t test.Failer, instances ...Instance)
-
 	// Workloads retrieves the list of all deployed workloads for this Echo service.
 	// Guarantees at least one workload, if error == nil.
 	Workloads() ([]Workload, error)
@@ -90,6 +83,9 @@ type WorkloadPort struct {
 
 	// TLS determines whether the connection will be plain text or TLS. By default this is false (plain text).
 	TLS bool
+
+	// ServerFirst determines whether the port will use server first communication, meaning the client will not send the first byte.
+	ServerFirst bool
 }
 
 // Port exposed by an Echo Instance
@@ -111,6 +107,9 @@ type Port struct {
 
 	// TLS determines whether the connection will be plain text or TLS. By default this is false (plain text).
 	TLS bool
+
+	// ServerFirst determines whether the port will use server first communication, meaning the client will not send the first byte.
+	ServerFirst bool
 }
 
 // Workload provides an interface for a single deployed echo server.

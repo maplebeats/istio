@@ -32,7 +32,6 @@ import (
 	"istio.io/istio/pkg/test/echo/proto"
 	"istio.io/istio/pkg/test/echo/server/forwarder"
 	"istio.io/istio/pkg/test/util/retry"
-	"istio.io/pkg/log"
 )
 
 var _ Instance = &grpcInstance{}
@@ -46,6 +45,10 @@ func newGRPC(config Config) Instance {
 	return &grpcInstance{
 		Config: config,
 	}
+}
+
+func (s *grpcInstance) GetConfig() Config {
+	return s.Config
 }
 
 func (s *grpcInstance) Start(onReady OnReadyFunc) error {
@@ -62,7 +65,7 @@ func (s *grpcInstance) Start(onReady OnReadyFunc) error {
 		// Create the TLS credentials
 		creds, errCreds := credentials.NewServerTLSFromFile(s.TLSCert, s.TLSKey)
 		if errCreds != nil {
-			log.Errorf("could not load TLS keys: %s", errCreds)
+			epLog.Errorf("could not load TLS keys: %s", errCreds)
 		}
 		s.server = grpc.NewServer(grpc.Creds(creds))
 	} else {
@@ -106,9 +109,9 @@ func (s *grpcInstance) awaitReady(onReady OnReadyFunc, listener net.Listener) {
 		return err
 	}, retry.Timeout(readyTimeout), retry.Delay(readyInterval))
 	if err != nil {
-		log.Errorf("readiness failed for GRPC endpoint %s: %v", listener.Addr().String(), err)
+		epLog.Errorf("readiness failed for GRPC endpoint %s: %v", listener.Addr().String(), err)
 	} else {
-		log.Infof("ready for GRPC endpoint %s", listener.Addr().String())
+		epLog.Infof("ready for GRPC endpoint %s", listener.Addr().String())
 	}
 }
 
@@ -144,7 +147,7 @@ func (h *grpcHandler) Echo(ctx context.Context, req *proto.EchoRequest) (*proto.
 		}
 	}
 
-	log.Infof("GRPC Request:\n  Host: %s\n  Message: %s\n  Headers: %v\n", host, req.GetMessage(), md)
+	epLog.Infof("GRPC Request:\n  Host: %s\n  Message: %s\n  Headers: %v\n", host, req.GetMessage(), md)
 
 	portNumber := 0
 	if h.Port != nil {
@@ -165,6 +168,7 @@ func (h *grpcHandler) Echo(ctx context.Context, req *proto.EchoRequest) (*proto.
 }
 
 func (h *grpcHandler) ForwardEcho(ctx context.Context, req *proto.ForwardEchoRequest) (*proto.ForwardEchoResponse, error) {
+	epLog.Infof("ForwardEcho[%s] request", req.Url)
 	instance, err := forwarder.New(forwarder.Config{
 		Request: req,
 		Dialer:  h.Dialer,
@@ -175,5 +179,7 @@ func (h *grpcHandler) ForwardEcho(ctx context.Context, req *proto.ForwardEchoReq
 	}
 	defer instance.Close()
 
-	return instance.Run(ctx)
+	ret, err := instance.Run(ctx)
+	epLog.Infof("ForwardEcho[%s] response: %v and error %v", req.Url, ret.GetOutput(), err)
+	return ret, err
 }

@@ -70,6 +70,8 @@ var (
 	ClusterCPResources = []schema.GroupVersionKind{
 		{Group: "admissionregistration.k8s.io", Version: "v1beta1", Kind: name.MutatingWebhookConfigurationStr},
 		{Group: "admissionregistration.k8s.io", Version: "v1", Kind: name.MutatingWebhookConfigurationStr},
+		{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: name.ClusterRoleStr},
+		{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: name.ClusterRoleBindingStr},
 	}
 	// AllClusterResources lists all cluster scope resources types which should be deleted in purge case, including CRD.
 	AllClusterResources = append(ClusterResources,
@@ -201,8 +203,16 @@ func (h *HelmReconciler) GetPrunedResources(revision string, includeClusterResou
 func (h *HelmReconciler) DeleteControlPlaneByManifests(manifestMap name.ManifestMap,
 	revision string, includeClusterResources bool) error {
 	labels := map[string]string{
-		label.IstioRev:   revision,
 		operatorLabelStr: operatorReconcileStr,
+	}
+	cpManifestMap := make(name.ManifestMap)
+	if revision != "" {
+		labels[label.IstioRev] = revision
+	}
+	if !includeClusterResources {
+		// only delete istiod resources if revision is empty and --purge flag is not true.
+		cpManifestMap[name.PilotComponentName] = manifestMap[name.PilotComponentName]
+		manifestMap = cpManifestMap
 	}
 	for cn, mf := range manifestMap.Consolidated() {
 		if cn == string(name.IstioBaseComponentName) && !includeClusterResources {
@@ -300,6 +310,7 @@ func (h *HelmReconciler) deleteResources(excluded map[string]bool, coreLabels ma
 			} else {
 				// do not return error if resources are not found
 				h.opts.Log.LogAndPrintf("object: %s is not being deleted because it no longer exist", obj.Hash())
+				continue
 			}
 		}
 		if !all {

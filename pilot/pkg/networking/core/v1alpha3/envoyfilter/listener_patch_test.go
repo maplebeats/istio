@@ -42,6 +42,7 @@ import (
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/networking/util"
 	memregistry "istio.io/istio/pilot/pkg/serviceregistry/memory"
+	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/mesh"
 	"istio.io/istio/pkg/config/schema/collections"
 	"istio.io/istio/pkg/config/schema/gvk"
@@ -62,8 +63,8 @@ func buildEnvoyFilterConfigStore(configPatches []*networking.EnvoyFilter_EnvoyCo
 	store := model.MakeIstioStore(memory.Make(collections.Pilot))
 
 	for i, cp := range configPatches {
-		store.Create(model.Config{
-			ConfigMeta: model.ConfigMeta{
+		store.Create(config.Config{
+			Meta: config.Meta{
 				Name:             fmt.Sprintf("test-envoyfilter-%d", i),
 				Namespace:        "not-default",
 				GroupVersionKind: gvk.EnvoyFilter,
@@ -953,7 +954,7 @@ func TestApplyListenerPatches(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ApplyListenerPatches(tt.args.patchContext, tt.args.proxy, tt.args.push,
+			got := ApplyListenerPatches(tt.args.patchContext, tt.args.proxy, tt.args.push, tt.args.push.EnvoyFilters(tt.args.proxy),
 				tt.args.listeners, tt.args.skipAdds)
 			if diff := cmp.Diff(tt.want, got, protocmp.Transform()); diff != "" {
 				t.Errorf("ApplyListenerPatches(): %s mismatch (-want +got):\n%s", tt.name, diff)
@@ -1040,7 +1041,7 @@ func BenchmarkTelemetryV2Filters(b *testing.B) {
 	b.ResetTimer()
 	for n := 0; n < b.N; n++ {
 		copied := proto.Clone(l)
-		got = ApplyListenerPatches(networking.EnvoyFilter_SIDECAR_OUTBOUND, sidecarProxy, push,
+		got = ApplyListenerPatches(networking.EnvoyFilter_SIDECAR_OUTBOUND, sidecarProxy, push, push.EnvoyFilters(sidecarProxy),
 			[]*listener.Listener{copied.(*listener.Listener)}, false)
 	}
 	_ = got

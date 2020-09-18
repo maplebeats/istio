@@ -244,6 +244,7 @@ func (instance *ServiceInstance) DeepCopy() *ServiceInstance {
 }
 
 type WorkloadInstance struct {
+	Name      string            `json:"name,omitempty"`
 	Namespace string            `json:"namespace,omitempty"`
 	Endpoint  *IstioEndpoint    `json:"endpoint,omitempty"`
 	PortMap   map[string]uint32 `json:"portMap,omitempty"`
@@ -256,6 +257,7 @@ func (instance *WorkloadInstance) DeepCopy() *WorkloadInstance {
 		pmap[k] = v
 	}
 	return &WorkloadInstance{
+		Name:      instance.Name,
 		Namespace: instance.Namespace,
 		PortMap:   pmap,
 		Endpoint:  instance.Endpoint.DeepCopy(),
@@ -293,6 +295,9 @@ func WorkloadInstancesEqual(first, second *WorkloadInstance) bool {
 		return false
 	}
 	if first.Namespace != second.Namespace {
+		return false
+	}
+	if first.Name != second.Name {
 		return false
 	}
 	if !portMapEquals(first.PortMap, second.PortMap) {
@@ -350,9 +355,9 @@ type Locality struct {
 // port 80 are forwarded to port 55446, and connections to port 8080 are
 // forwarded to port 33333,
 //
-// then internally, we have two two endpoint structs for the
+// then internally, we have two endpoint structs for the
 // service catalog.mystore.com
-//  --> 172.16.0.1:54546 (with ServicePort pointing to 80) and
+//  --> 172.16.0.1:55446 (with ServicePort pointing to 80) and
 //  --> 172.16.0.1:33333 (with ServicePort pointing to 8080)
 //
 // TODO: Investigate removing ServiceInstance entirely.
@@ -460,7 +465,7 @@ type ServiceDiscovery interface {
 	// CDS (clusters.go) calls it for building 'dnslb' type clusters.
 	// EDS calls it for building the endpoints result.
 	// Consult istio-dev before using this for anything else (except debugging/tools)
-	InstancesByPort(svc *Service, servicePort int, labels labels.Collection) ([]*ServiceInstance, error)
+	InstancesByPort(svc *Service, servicePort int, labels labels.Collection) []*ServiceInstance
 
 	// GetProxyServiceInstances returns the service instances that co-located with a given Proxy
 	//
@@ -574,12 +579,9 @@ func ParseSubsetKey(s string) (direction TrafficDirection, subsetName string, ho
 }
 
 // GetServiceAddressForProxy returns a Service's IP address specific to the cluster where the node resides
-func (s *Service) GetServiceAddressForProxy(node *Proxy) string {
-	// todo reduce unnecessary locking
-	s.Mutex.RLock()
-	defer s.Mutex.RUnlock()
-	if node.Metadata != nil && node.Metadata.ClusterID != "" && s.ClusterVIPs[node.Metadata.ClusterID] != "" {
-		return s.ClusterVIPs[node.Metadata.ClusterID]
+func (s *Service) GetServiceAddressForProxy(node *Proxy, push *PushContext) string {
+	if node.Metadata != nil && node.Metadata.ClusterID != "" && push.ClusterVIPs[s][node.Metadata.ClusterID] != "" {
+		return push.ClusterVIPs[s][node.Metadata.ClusterID]
 	}
 	if node.Metadata != nil && node.Metadata.DNSCapture != "" &&
 		s.Address == constants.UnspecifiedIP && s.AutoAllocatedAddress != "" {
@@ -609,11 +611,7 @@ func GetServiceAccounts(svc *Service, ports []int, discovery ServiceDiscovery) [
 	// Get the service accounts running service within Kubernetes. This is reflected by the pods that
 	// the service is deployed on, and the service accounts of the pods.
 	for _, port := range ports {
-		svcInstances, err := discovery.InstancesByPort(svc, port, labels.Collection{})
-		if err != nil {
-			log.Warnf("InstancesByPort(%s:%d) error: %v", svc.Hostname, port, err)
-			return nil
-		}
+		svcInstances := discovery.InstancesByPort(svc, port, labels.Collection{})
 		instances = append(instances, svcInstances...)
 	}
 
